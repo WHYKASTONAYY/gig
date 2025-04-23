@@ -1,0 +1,8 @@
+# --- START OF FILE requirements.txt ---
+python-telegram-bot[ext]>=20.0
+# aiocryptopay>=0.4.7 # Removed
+pytz
+requests>=2.25.0
+Flask>=2.0.0
+nest_asyncio>=1.5.0
+# --- END OF FILE requirements.txt ---
