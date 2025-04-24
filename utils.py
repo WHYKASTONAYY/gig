@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import asyncio
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_DOWN, ROUND_UP # Added ROUND_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_UP # Use Decimal for financial calculations
 import requests # Added for API calls
 
 # --- Telegram Imports ---
@@ -88,9 +88,8 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
     # --- English ---
     "en": {
         "native_name": "English",
-        # ... (keep all existing EN translations) ...
-        "payment_amount_too_low_api": "❌ Payment Amount Too Low: The equivalent of {target_eur_amount} EUR in {currency} ({crypto_amount}) is below the minimum required by the payment provider ({min_amount} {currency}). Please try a higher EUR amount.", # Added specific error message
-        "error_min_amount_fetch": "❌ Error: Could not retrieve minimum payment amount for {currency}. Please try again later or select a different currency.", # Added
+        "payment_amount_too_low_api": "❌ Payment Amount Too Low: The equivalent of {target_eur_amount} EUR in {currency} ({crypto_amount}) is below the minimum required by the payment provider ({min_amount} {currency})\\. Please try a higher EUR amount\\.", # Added specific error message
+        "error_min_amount_fetch": "❌ Error: Could not retrieve minimum payment amount for {currency}\\. Please try again later or select a different currency\\.", # Added
         "welcome": "👋 Welcome, {username}!",
         "profile": "🎉 Your Profile\n\n👤 Status: {status} {progress_bar}\n💰 Balance: {balance} EUR\n📦 Total Purchases: {purchases}\n🛒 Basket Items: {basket}",
         "refill": "💸 Top Up Your Balance\n\nChoose a payment method below:",
@@ -233,14 +232,16 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
         "calculating_amount": "⏳ Calculating required amount and preparing invoice...", # NowPayments version
         "error_getting_rate": "❌ Error: Could not get exchange rate for {asset}. Please try another currency or contact support.",
         "error_preparing_payment": "❌ An error occurred while preparing the payment. Please try again later.",
-        "invoice_title_refill": "Top-Up Invoice Created", # Keep this title
-        "please_pay_label": "Please pay",
-        "target_value_label": "Target Value",
-        "payment_address_label": "Payment Address",
-        "amount_label": "Amount",
-        "expires_at_label": "Expires At",
-        "send_warning_template": "⚠️ Send only {asset}. Ensure you send the exact amount.",
-        "confirmation_note": "✅ Confirmation is automatic. Please wait a few minutes after sending.",
+        "invoice_title_refill": "*Top\\-Up Invoice Created*", # Use Markdown
+        "min_amount_label": "*Minimum Amount:*", # New key
+        "payment_address_label": "*Payment Address:*", # Use Markdown
+        "amount_label": "*Amount:*", # Changed label slightly
+        "please_pay_label": "Please pay", # Kept for potential future use, but current message uses min_amount_label
+        "target_value_label": "Target Value", # Kept for potential future use
+        "expires_at_label": "*Expires At:*", # Use Markdown
+        "send_warning_template": "⚠️ *Important:* Send *only* {asset} to this address\\.", # Updated wording, added Markdown & escaping
+        "overpayment_note": "ℹ️ _Sending more than this amount is okay\\! Your balance will be credited based on the amount received after network confirmation\\._", # New key with Markdown & escaping
+        "confirmation_note": "✅ Confirmation is automatic via webhook after network confirmation\\.", # Updated wording & escaping
         "pay_now_button_nowpayments": "Pay via NOWPayments", # New button text if needed
         "check_status_button": "Check Payment Status", # Removed
         "top_up_success_title": "✅ Top Up Successful!",
@@ -283,11 +284,18 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
         "support": "📞 Need Help? Contact {support}!",
         "file_download_error": "❌ Error: Failed to Download Media. Please try again or contact {support}.",
     },
-    # ... Add lt and ru translations here, ensuring the new keys are included ...
     "lt": {
         "native_name": "Lietuvių",
-        "payment_amount_too_low_api": "❌ Mokėjimo Suma Per Maža: Reikalinga {currency} suma ({crypto_amount}) yra mažesnė už minimalią mokėjimo tiekėjo leistiną sumą ({min_amount} {currency}). Bandykite didesnę EUR sumą.",
-        "error_min_amount_fetch": "❌ Klaida: Nepavyko gauti minimalios mokėjimo sumos {currency}. Bandykite vėliau arba pasirinkite kitą valiutą.",
+        "payment_amount_too_low_api": "❌ Mokėjimo Suma Per Maža: {target_eur_amount} EUR atitikmuo {currency} ({crypto_amount}) yra mažesnis už minimalią mokėjimo tiekėjo reikalaujamą sumą ({min_amount} {currency})\\. Bandykite didesnę EUR sumą\\.",
+        "error_min_amount_fetch": "❌ Klaida: Nepavyko gauti minimalios mokėjimo sumos {currency}\\. Bandykite vėliau arba pasirinkite kitą valiutą\\.",
+        "invoice_title_refill": "*Sąskaita Papildymui Sukurta*",
+        "min_amount_label": "*Minimali Suma:*",
+        "payment_address_label": "*Mokėjimo Adresas:*",
+        "amount_label": "*Suma:*",
+        "expires_at_label": "*Galioja Iki:*",
+        "send_warning_template": "⚠️ *Svarbu:* Siųskite *tik* {asset} šiuo adresu\\.",
+        "overpayment_note": "ℹ️ _Siųsti daugiau nei nurodyta suma yra galima\\! Jūsų balansas bus papildytas pagal gautą kriptovaliutos kiekį po tinklo patvirtinimo\\._",
+        "confirmation_note": "✅ Patvirtinimas automatinis per webhook po tinklo patvirtinimo\\.",
         # ... (rest of Lithuanian translations) ...
         "welcome": "👋 Sveiki, {username}!",
         "status_label": "Statusas",
@@ -411,14 +419,8 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
         "calculating_amount": "⏳ Skaičiuojama reikiama suma ir ruošiama sąskaita...",
         "error_getting_rate": "❌ Klaida: Nepavyko gauti {asset} keitimo kurso. Bandykite kitą valiutą arba susisiekite su palaikymo tarnyba.",
         "error_preparing_payment": "❌ Ruošiant mokėjimą įvyko klaida. Bandykite dar kartą vėliau.",
-        "invoice_title_refill": "Sukurta papildymo sąskaita",
         "please_pay_label": "Prašome sumokėti",
         "target_value_label": "Numatytoji vertė",
-        "payment_address_label": "Mokėjimo adresas",
-        "amount_label": "Suma",
-        "expires_at_label": "Galioja iki",
-        "send_warning_template": "⚠️ Siųskite tik {asset}. Įsitikinkite, kad siunčiate tikslią sumą.",
-        "confirmation_note": "✅ Patvirtinimas automatinis. Palaukite kelias minutes po siuntimo.",
         "pay_now_button_nowpayments": "Mokėti per NOWPayments",
         "top_up_success_title": "✅ Papildymas sėkmingas!",
         "amount_added_label": "Pridėta suma",
@@ -461,10 +463,18 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
         "support": "📞 Reikia pagalbos? Susisiekite su {support}!",
         "file_download_error": "❌ Klaida: Nepavyko atsisiųsti medijos. Bandykite dar kartą arba susisiekite su {support}.",
     },
-    "ru": { # --- Russian translations ---
+    "ru": {
         "native_name": "Русский",
-        "payment_amount_too_low_api": "❌ Сумма платежа слишком мала: Требуемая сумма в {currency} ({crypto_amount}) меньше минимально допустимой платежным провайдером ({min_amount} {currency}). Пожалуйста, попробуйте большую сумму в EUR.",
-        "error_min_amount_fetch": "❌ Ошибка: Не удалось получить минимальную сумму платежа для {currency}. Пожалуйста, попробуйте позже или выберите другую валюту.",
+        "payment_amount_too_low_api": "❌ Сумма платежа слишком мала: Эквивалент {target_eur_amount} EUR в {currency} ({crypto_amount}) меньше минимально допустимой платежным провайдером ({min_amount} {currency})\\. Пожалуйста, попробуйте большую сумму в EUR\\.",
+        "error_min_amount_fetch": "❌ Ошибка: Не удалось получить минимальную сумму платежа для {currency}\\. Пожалуйста, попробуйте позже или выберите другую валюту\\.",
+        "invoice_title_refill": "*Счет на Пополнение Создан*",
+        "min_amount_label": "*Минимальная Сумма:*",
+        "payment_address_label": "*Адрес для Оплаты:*",
+        "amount_label": "*Сумма:*",
+        "expires_at_label": "*Истекает:*",
+        "send_warning_template": "⚠️ *Важно:* Отправляйте *только* {asset} на этот адрес\\.",
+        "overpayment_note": "ℹ️ _Отправка большей суммы возможна\\! Ваш баланс будет пополнен на основе полученной суммы после подтверждения сети\\._",
+        "confirmation_note": "✅ Подтверждение автоматическое через вебхук после подтверждения сети\\.",
         # ... (rest of Russian translations) ...
         "welcome": "👋 Добро пожаловать, {username}!",
         "status_label": "Статус",
@@ -588,14 +598,8 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
         "calculating_amount": "⏳ Рассчитываем необходимую сумму и готовим счет...",
         "error_getting_rate": "❌ Ошибка: Не удалось получить обменный курс для {asset}. Пожалуйста, попробуйте другую валюту или свяжитесь со службой поддержки.",
         "error_preparing_payment": "❌ Произошла ошибка при подготовке платежа. Пожалуйста, попробуйте позже.",
-        "invoice_title_refill": "Счет на пополнение создан",
         "please_pay_label": "Пожалуйста, оплатите",
         "target_value_label": "Целевая стоимость",
-        "payment_address_label": "Адрес для оплаты",
-        "amount_label": "Сумма",
-        "expires_at_label": "Истекает",
-        "send_warning_template": "⚠️ Отправляйте только {asset}. Убедитесь, что отправляете точную сумму.",
-        "confirmation_note": "✅ Подтверждение автоматическое. Пожалуйста, подождите несколько минут после отправки.",
         "pay_now_button_nowpayments": "Оплатить через NOWPayments",
         "top_up_success_title": "✅ Пополнение успешно!",
         "amount_added_label": "Добавлено",
@@ -1146,25 +1150,29 @@ def get_nowpayments_min_amount(currency_code: str) -> Decimal | None:
     # Fetch from NOWPayments API
     try:
         url = f"{NOWPAYMENTS_API_URL}/v1/min-amount"
-        params = {'currency_from': currency_code_lower}
+        params = {'currency_from': currency_code_lower, 'fiat_currency': 'eur'} # Added fiat_currency for context if needed
         headers = {'x-api-key': NOWPAYMENTS_API_KEY}
 
         response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
 
-        if 'min_amount' in data:
-            min_amount = Decimal(str(data['min_amount']))
+        # API might return min_amount OR min_amount_EUR, prioritize min_amount if present
+        min_amount_key = 'min_amount'
+        if min_amount_key in data and data[min_amount_key] is not None:
+            min_amount = Decimal(str(data[min_amount_key]))
             min_amount_cache[currency_code_lower] = (min_amount, now) # Update cache
             logger.info(f"Fetched minimum amount for {currency_code_lower}: {min_amount} from NOWPayments.")
             return min_amount
         else:
+            # Fallback or specific error logging
             logger.warning(f"Could not find 'min_amount' for {currency_code_lower} in NOWPayments response: {data}")
-            return None
+            return None # Or handle potentially using min_amount_EUR if that's relevant
     except requests.exceptions.Timeout:
         logger.error(f"Timeout fetching minimum amount for {currency_code_lower} from NOWPayments.")
         return None
     except requests.exceptions.RequestException as e:
+        # Log specific API errors if possible (e.g., invalid currency)
         logger.error(f"Error fetching minimum amount for {currency_code_lower} from NOWPayments: {e}")
         return None
     except (KeyError, ValueError, json.JSONDecodeError) as e:
