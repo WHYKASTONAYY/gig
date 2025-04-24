@@ -7,6 +7,7 @@ import asyncio
 import uuid # For generating unique order IDs
 import requests # For making API calls to NOWPayments
 from decimal import Decimal, ROUND_UP, ROUND_DOWN # Use Decimal for precision
+import json # For parsing potential error messages
 
 # --- Telegram Imports ---
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -38,15 +39,7 @@ logger = logging.getLogger(__name__)
 async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, pay_currency_code: str) -> dict:
     """
     Creates a payment invoice using the NOWPayments API. Checks minimum amount.
-
-    Args:
-        user_id: The Telegram user ID initiating the deposit.
-        target_eur_amount: The amount in EUR the user wants to deposit (as Decimal).
-        pay_currency_code: The lowercase crypto currency code (e.g., 'btc', 'ltc').
-
-    Returns:
-        A dictionary containing the NOWPayments API response on success,
-        or an error dictionary {'error': 'message', ...} on failure.
+    Includes original target EUR amount in success response.
     """
     if not NOWPAYMENTS_API_KEY:
         logger.error("NOWPayments API key is not configured.")
@@ -65,34 +58,30 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
     crypto_amount_needed = (target_eur_amount / eur_price).quantize(Decimal('1E-8'), rounding=ROUND_UP)
     logger.info(f"Calculated {crypto_amount_needed} {pay_currency_code} needed for {target_eur_amount} EUR (Rate: {eur_price} EUR/{pay_currency_code})")
 
-    # --- NEW: Check Minimum Amount ---
+    # 3. Check Minimum Amount
     min_amount_api = get_nowpayments_min_amount(pay_currency_code) # Sync call, uses cache
     if min_amount_api is None:
         logger.error(f"Could not fetch minimum amount for {pay_currency_code} from NOWPayments API.")
         return {'error': 'min_amount_fetch_error', 'currency': pay_currency_code.upper()}
 
-    if crypto_amount_needed < min_amount_api:
-        logger.warning(f"Calculated amount {crypto_amount_needed} {pay_currency_code} is less than NOWPayments minimum {min_amount_api} {pay_currency_code}.")
-        return {
-            'error': 'amount_too_low_api',
-            'currency': pay_currency_code.upper(),
-            'min_amount': f"{min_amount_api:f}".rstrip('0').rstrip('.'), # Format decimal nicely
-            'crypto_amount': f"{crypto_amount_needed:f}".rstrip('0').rstrip('.') # Also send calculated amount
-        }
-    # --- END NEW Check ---
+    # Use the *larger* of the calculated amount or the API minimum for the invoice
+    invoice_crypto_amount = max(crypto_amount_needed, min_amount_api)
+    if invoice_crypto_amount > crypto_amount_needed:
+        logger.warning(f"Calculated amount {crypto_amount_needed} was below NOWPayments minimum {min_amount_api}. Using minimum for invoice: {invoice_crypto_amount} {pay_currency_code}")
 
-    # 3. Prepare API Request Data
+
+    # 4. Prepare API Request Data
     order_id = f"USER{user_id}_DEPOSIT_{int(time.time())}_{uuid.uuid4().hex[:6]}" # Unique order ID
     ipn_callback_url = f"{WEBHOOK_URL}/webhook" # Ensure this matches your Render URL + /webhook
 
     payload = {
-        "price_amount": float(crypto_amount_needed), # API expects float for price_amount (crypto amount)
-        "price_currency": pay_currency_code, # Price amount is now in crypto, price_currency should match pay_currency
-        "pay_currency": pay_currency_code, # The currency the user will pay with
+        "price_amount": float(invoice_crypto_amount), # Use the potentially adjusted crypto amount
+        "price_currency": pay_currency_code, # Price is in the crypto currency
+        "pay_currency": pay_currency_code,
         "ipn_callback_url": ipn_callback_url,
         "order_id": order_id,
         "order_description": f"Balance top-up for user {user_id} (~{target_eur_amount:.2f} EUR)",
-        "is_fixed_rate": False, # Use floating rate for flexibility
+        "is_fixed_rate": False, # Floating rate is essential for allowing overpayment
     }
 
     headers = {
@@ -101,12 +90,13 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
     }
     payment_url = f"{NOWPAYMENTS_API_URL}/v1/payment"
 
-    # 4. Make API Call (Using synchronous requests in a thread)
+    # 5. Make API Call
     try:
         def make_request():
+            # make_request inner logic remains the same as previous version
             try:
-                response = requests.post(payment_url, headers=headers, json=payload, timeout=20) # Added timeout
-                response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+                response = requests.post(payment_url, headers=headers, json=payload, timeout=20)
+                response.raise_for_status()
                 return response.json()
             except requests.exceptions.Timeout:
                  logger.error(f"NOWPayments API request timed out for order {order_id}.")
@@ -116,15 +106,18 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
                  status_code = e.response.status_code if e.response is not None else None
                  error_content = e.response.text if e.response is not None else "No response content"
                  if status_code == 401: return {'error': 'api_key_invalid'}
-                 # Check specific error based on previous log
+                 # Check specific error based on previous log / API minimum check
                  if status_code == 400 and "AMOUNT_MINIMAL_ERROR" in error_content:
                      logger.warning(f"NOWPayments rejected payment for {order_id} due to amount being too low (API check).")
-                     # Extract min amount from message if possible (fallback)
                      min_amount_fallback = "N/A"
                      try:
                          msg_data = json.loads(error_content)
-                         min_amount_fallback = msg_data.get("message", "").split(" ")[-1] # Attempt to parse
-                     except: pass
+                         # Extract the numeric part after 'less than minimal '
+                         msg_parts = msg_data.get("message", "").split("less than minimal ")
+                         if len(msg_parts) > 1:
+                             min_amount_fallback = msg_parts[1].strip()
+                     except Exception as parse_err:
+                          logger.warning(f"Could not parse min amount from error msg: {parse_err}")
                      return {'error': 'amount_too_low_api', 'currency': pay_currency_code.upper(), 'min_amount': min_amount_fallback}
 
                  return {'error': 'api_request_failed', 'details': str(e), 'status': status_code, 'content': error_content[:200]}
@@ -137,15 +130,24 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
         if 'error' in payment_data:
              if payment_data['error'] == 'api_key_invalid': logger.critical("NOWPayments API Key seems invalid!")
              elif payment_data.get('internal'): logger.error("Internal error during API request (e.g., timeout).")
+             # Handle amount_too_low error returned from make_request
+             elif payment_data['error'] == 'amount_too_low_api':
+                 # Add the originally calculated crypto amount for the user message
+                 payment_data['crypto_amount'] = f"{crypto_amount_needed:f}".rstrip('0').rstrip('.')
+                 return payment_data # Pass this specific error back
              else: logger.error(f"NOWPayments API returned error: {payment_data}")
              return payment_data
 
-        # 5. Validate Response
+        # 6. Validate Response
         if not all(k in payment_data for k in ['payment_id', 'pay_address', 'pay_amount', 'pay_currency']):
              logger.error(f"Invalid response from NOWPayments API for order {order_id}: Missing keys. Response: {payment_data}")
              return {'error': 'invalid_api_response'}
 
-        # 6. Store Pending Deposit Info
+        # --- ADD original target amount to response data ---
+        payment_data['target_eur_amount_orig'] = float(target_eur_amount)
+        payment_data['min_amount_from_api'] = float(min_amount_api) # Also add the confirmed min amount
+
+        # 7. Store Pending Deposit Info
         add_success = await asyncio.to_thread(
             add_pending_deposit,
             payment_data['payment_id'],
@@ -200,7 +202,6 @@ async def handle_select_refill_crypto(update: Update, context: ContextTypes.DEFA
     error_invalid_response_msg = lang_data.get("error_invalid_nowpayments_response", "❌ Payment API Error: Invalid response received. Please contact support.")
     error_api_key_msg = lang_data.get("error_nowpayments_api_key", "❌ Payment API Error: Invalid API key. Please contact support.")
     error_pending_db_msg = lang_data.get("payment_pending_db_error", "❌ Database Error: Could not record pending payment. Please contact support.")
-    # Specific message for amount too low based on API check
     error_amount_too_low_api_msg = lang_data.get("payment_amount_too_low_api", "❌ Payment Amount Too Low: The equivalent of {target_eur_amount} EUR in {currency} ({crypto_amount}) is below the minimum required by the payment provider ({min_amount} {currency}). Please try a higher EUR amount.")
     error_min_amount_fetch_msg = lang_data.get("error_min_amount_fetch", "❌ Error: Could not retrieve minimum payment amount for {currency}. Please try again later or select a different currency.")
     error_getting_rate_msg = lang_data.get("error_getting_rate", "❌ Error: Could not get exchange rate for {asset}. Please try another currency or contact support.")
@@ -228,17 +229,20 @@ async def handle_select_refill_crypto(update: Update, context: ContextTypes.DEFA
         elif error_code == 'api_key_invalid': error_message_to_user = error_api_key_msg
         elif error_code == 'invalid_api_response': error_message_to_user = error_invalid_response_msg
         elif error_code == 'pending_db_error': error_message_to_user = error_pending_db_msg
-        # **** NEW ERROR HANDLING ****
+        # **** UPDATED ERROR HANDLING ****
         elif error_code == 'amount_too_low_api':
-            error_message_to_user = error_amount_too_low_api_msg.format(
-                target_eur_amount=format_currency(refill_eur_amount_decimal),
-                currency=payment_result.get('currency', selected_asset_code.upper()),
-                crypto_amount=payment_result.get('crypto_amount', 'N/A'),
-                min_amount=payment_result.get('min_amount', 'N/A')
-            )
+             # Use Decimal formatting for crypto amounts
+             min_amount_dec = Decimal(str(payment_result.get('min_amount', 0)))
+             crypto_amount_dec = Decimal(str(payment_result.get('crypto_amount', 0)))
+             error_message_to_user = error_amount_too_low_api_msg.format(
+                 target_eur_amount=format_currency(refill_eur_amount_decimal),
+                 currency=payment_result.get('currency', selected_asset_code.upper()),
+                 crypto_amount=f"{crypto_amount_dec:.8f}".rstrip('0').rstrip('.'), # Format with precision
+                 min_amount=f"{min_amount_dec:.8f}".rstrip('0').rstrip('.') # Format with precision
+             )
         elif error_code == 'min_amount_fetch_error':
             error_message_to_user = error_min_amount_fetch_msg.format(currency=payment_result.get('currency', selected_asset_code.upper()))
-        # **** END NEW ERROR HANDLING ****
+        # **** END UPDATED ERROR HANDLING ****
         elif error_code in ['api_timeout', 'api_request_failed', 'api_unexpected_error', 'internal_server_error', 'payout_error_detected']:
             error_message_to_user = error_nowpayments_api_msg # Generic API error for user
 
@@ -255,9 +259,8 @@ async def handle_select_refill_crypto(update: Update, context: ContextTypes.DEFA
 
 
 # --- Display NOWPayments Invoice ---
-# (display_nowpayments_invoice function remains unchanged from previous correct version)
 async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, payment_data: dict):
-    """Displays the NOWPayments invoice details to the user by EDITING the message."""
+    """Displays the NOWPayments invoice details with improved formatting and overpayment note."""
     query = update.callback_query
     chat_id = query.message.chat_id
     lang = context.user_data.get("lang", "en") # Get language
@@ -266,65 +269,60 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
     try:
         # Extract required data safely
         pay_address = payment_data.get('pay_address')
-        pay_amount_str = payment_data.get('pay_amount') # Amount in crypto (string from API)
+        pay_amount_str = payment_data.get('pay_amount') # Min crypto amount (string from API)
         pay_currency = payment_data.get('pay_currency', 'N/A').upper() # Display uppercase
         payment_id = payment_data.get('payment_id', 'N/A')
         expiration_date_str = payment_data.get('expiration_estimate_date')
-        # Try to get target EUR from original context if available, otherwise from payment data (might be crypto amount there)
-        target_eur_context = context.user_data.get('refill_eur_amount') # This might have been popped already
-        target_eur_display = "N/A"
-        if target_eur_context:
-            target_eur_display = format_currency(Decimal(str(target_eur_context)))
-        else:
-            # Fallback: Check if 'price_amount' and 'price_currency' indicate EUR in response
-            price_curr = payment_data.get('price_currency')
-            price_amt = payment_data.get('price_amount')
-            if price_curr and price_curr.lower() == 'eur' and price_amt:
-                try: target_eur_display = format_currency(Decimal(str(price_amt)))
-                except: pass # Keep N/A on error
-            # If still N/A, maybe try fetching from DB (less ideal here)
+        # Get original target EUR amount added in create_nowpayments_payment
+        target_eur_orig = payment_data.get('target_eur_amount_orig')
+        # Get the actual minimum required by API (might be > calculated amount)
+        min_amount_api = payment_data.get('min_amount_from_api')
+
 
         if not pay_address or not pay_amount_str:
             logger.error(f"Missing critical data in NOWPayments response for display: {payment_data}")
             raise ValueError("Missing payment address or amount")
 
         pay_amount_decimal = Decimal(pay_amount_str)
-        # Format crypto amount precisely, removing trailing zeros after normalization
+        # Format crypto amount nicely (e.g., 8 decimal places, remove trailing zeros)
         pay_amount_display = '{:f}'.format(pay_amount_decimal.normalize())
 
-        # Format expiration time
+        target_eur_display = format_currency(Decimal(str(target_eur_orig))) if target_eur_orig else "N/A"
+
         expiration_display = format_expiration_time(expiration_date_str)
 
         # Get translated texts
-        invoice_title_refill = lang_data.get("invoice_title_refill", "Top-Up Invoice Created")
-        please_pay_label = lang_data.get("please_pay_label", "Please pay")
-        target_value_label = lang_data.get("target_value_label", "Target Value")
-        payment_address_label = lang_data.get("payment_address_label", "Payment Address")
-        amount_label = lang_data.get("amount_label", "Amount")
-        expires_at_label = lang_data.get("expires_at_label", "Expires At")
-        send_warning_template = lang_data.get("send_warning_template", "⚠️ Send only {asset}. Ensure you send the exact amount.")
-        confirmation_note = lang_data.get("confirmation_note", "✅ Confirmation is automatic. Please wait a few minutes after sending.")
+        invoice_title_refill = lang_data.get("invoice_title_refill", "*Top\\-Up Invoice Created*") # Markdown default
+        min_amount_label = lang_data.get("min_amount_label", "*Minimum Amount:*") # New label
+        payment_address_label = lang_data.get("payment_address_label", "*Payment Address:*")
+        target_value_label = lang_data.get("target_value_label", "Target Value") # Keep for reference
+        expires_at_label = lang_data.get("expires_at_label", "*Expires At:*")
+        send_warning_template = lang_data.get("send_warning_template", "⚠️ *Important:* Send *only* {asset} to this address\\.") # Updated default
+        overpayment_note = lang_data.get("overpayment_note", "ℹ️ _Sending more than this amount is okay\\! Your balance will be credited based on the amount received after network confirmation\\._") # New note
+        confirmation_note = lang_data.get("confirmation_note", "✅ Confirmation is automatic via webhook after network confirmation\\.") # Updated default
         back_to_profile_button = lang_data.get("back_profile_button", "Back to Profile")
 
+        # Construct message using MarkdownV2
         msg_parts = [
-            f"*{invoice_title_refill}*", # Use Markdown for title
-            f"\n{amount_label}: `{pay_amount_display}` {pay_currency}", # Use backticks for amount
-            f"({target_value_label}: ~{target_eur_display} EUR)\n",
-            f"{payment_address_label}:\n`{pay_address}`\n", # Use backticks for address
-            send_warning_template.format(asset=pay_currency),
-            f"{expires_at_label}: {expiration_display}\n",
-            f"{confirmation_note}"
+            invoice_title_refill,
+            f"\n_(Requested: {helpers.escape_markdown(target_eur_display, version=2)} EUR)_",
+            f"\n{min_amount_label} `{pay_amount_display}` {helpers.escape_markdown(pay_currency, version=2)}",
+            overpayment_note,
+            f"\n{payment_address_label}",
+            f"`{helpers.escape_markdown(pay_address, version=2)}`", # Escape address just in case
+            f"\n{send_warning_template.format(asset=helpers.escape_markdown(pay_currency, version=2))}",
+            f"{expires_at_label} {helpers.escape_markdown(expiration_display, version=2)}",
+            f"\n{confirmation_note}"
         ]
 
-        # Escape markdown characters in the parts that need it
-        escaped_msg = helpers.escape_markdown("\n".join(msg_parts), version=2)
+        final_msg = "\n".join(msg_parts)
 
         keyboard = [[InlineKeyboardButton(f"⬅️ {back_to_profile_button}", callback_data="profile")]]
 
         await query.edit_message_text(
-            escaped_msg, # Send the escaped message
+            final_msg,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN_V2, # Tell Telegram it's MarkdownV2
+            parse_mode=ParseMode.MARKDOWN_V2,
             disable_web_page_preview=True
         )
     except (ValueError, KeyError, TypeError) as e:
@@ -332,16 +330,13 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
         error_display_msg = lang_data.get("error_preparing_payment", "❌ An error occurred while preparing the payment details. Please try again later.")
         back_button_markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"⬅️ {lang_data.get('back_profile_button', 'Back to Profile')}", callback_data="profile")]])
         try: await query.edit_message_text(error_display_msg, reply_markup=back_button_markup, parse_mode=None)
-        except Exception: pass # Ignore edit error here
+        except Exception: pass
     except telegram_error.BadRequest as e:
         if "message is not modified" not in str(e).lower():
-             logger.error(f"Error editing NOWPayments invoice message: {e}. Message: {escaped_msg}")
-             # If editing fails, maybe send a new message? Or just log it.
-             # For simplicity, just log the error for now.
-        else: await query.answer() # Ignore "not modified"
+             logger.error(f"Error editing NOWPayments invoice message: {e}. Message: {final_msg}")
+        else: await query.answer()
     except Exception as e:
          logger.error(f"Unexpected error in display_nowpayments_invoice: {e}", exc_info=True)
-         # Handle unexpected errors similarly
          error_display_msg = lang_data.get("error_preparing_payment", "❌ An unexpected error occurred while preparing the payment details.")
          back_button_markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"⬅️ {lang_data.get('back_profile_button', 'Back to Profile')}", callback_data="profile")]])
          try: await query.edit_message_text(error_display_msg, reply_markup=back_button_markup, parse_mode=None)
@@ -349,16 +344,10 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
 
 
 # --- Process Successful Refill (Called by Webhook Handler) ---
-# (process_successful_refill function remains unchanged from previous correct version)
+# (process_successful_refill function remains unchanged)
 async def process_successful_refill(user_id: int, amount_to_add_eur: Decimal, payment_id: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Handles DB updates after a NOWPayments deposit is confirmed via webhook.
-    Returns True if balance update was successful, False otherwise.
-    """
-    # context might be a dummy context created in the webhook, containing only context.bot
     bot = context.bot
-    # We don't have the original user's context, so fetch language from DB or default
-    user_lang = 'en' # Default
+    user_lang = 'en'
     conn_lang = None
     try:
         conn_lang = get_db_connection()
@@ -380,64 +369,54 @@ async def process_successful_refill(user_id: int, amount_to_add_eur: Decimal, pa
 
     conn = None
     db_update_successful = False
-    # Convert Decimal to float JUST for DB storage
     amount_float = float(amount_to_add_eur)
-    new_balance = Decimal('0.0') # Initialize as Decimal
+    new_balance = Decimal('0.0')
 
     try:
-        conn = get_db_connection() # Use helper
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("BEGIN")
         logger.info(f"Attempting balance update for user {user_id} by {amount_float:.2f} EUR (Payment ID: {payment_id})")
-
-        # --- Check if payment_id was already processed (idempotency) ---
-        # This requires adding a column to track processed payments if needed.
-        # For now, we rely on remove_pending_deposit happening after this returns True.
-        # If this function fails, remove_pending_deposit won't be called,
-        # allowing the webhook to potentially retry (if NOWPayments retries).
 
         update_result = c.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount_float, user_id))
         if update_result.rowcount == 0:
             logger.error(f"User {user_id} not found during refill DB update (Payment ID: {payment_id}). Rowcount: {update_result.rowcount}")
             conn.rollback()
-            return False # User doesn't exist?
+            return False
 
-        # Fetch new balance
         c.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
         new_balance_result = c.fetchone()
-        if new_balance_result: new_balance = Decimal(str(new_balance_result['balance'])) # Convert DB float back to Decimal
+        if new_balance_result: new_balance = Decimal(str(new_balance_result['balance']))
         else: logger.error(f"Could not fetch new balance for {user_id} after update."); conn.rollback(); return False
 
         conn.commit()
         db_update_successful = True
         logger.info(f"Successfully processed refill DB update for user {user_id}. Added: {amount_to_add_eur:.2f} EUR. New Balance: {new_balance:.2f} EUR.")
 
-        # --- Send confirmation message to user ---
         top_up_success_title = lang_data.get("top_up_success_title", "✅ Top Up Successful!")
         amount_added_label = lang_data.get("amount_added_label", "Amount Added")
         new_balance_label = lang_data.get("new_balance_label", "Your new balance")
         back_to_profile_button = lang_data.get("back_profile_button", "Back to Profile")
 
-        amount_str = format_currency(amount_to_add_eur) # Use Decimal
-        new_balance_str = format_currency(new_balance) # Use Decimal
+        amount_str = format_currency(amount_to_add_eur)
+        new_balance_str = format_currency(new_balance)
 
         success_msg = (f"{top_up_success_title}\n\n{amount_added_label}: {amount_str} EUR\n"
                        f"{new_balance_label}: {new_balance_str} EUR")
         keyboard = [[InlineKeyboardButton(f"👤 {back_to_profile_button}", callback_data="profile")]]
 
-        # Send message using the bot instance from the passed context
         await send_message_with_retry(bot, user_id, success_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
-        return True # Indicate DB update success
+        return True
 
     except sqlite3.Error as e:
         logger.error(f"DB error during process_successful_refill user {user_id} (Payment ID: {payment_id}): {e}", exc_info=True)
         if conn and conn.in_transaction: conn.rollback()
-        return False # Indicate DB update failure
+        return False
     except Exception as e:
          logger.error(f"Unexpected error during process_successful_refill user {user_id} (Payment ID: {payment_id}): {e}", exc_info=True)
          if conn and conn.in_transaction: conn.rollback()
-         return False # Indicate failure
+         return False
     finally:
         if conn: conn.close()
 
@@ -614,7 +593,7 @@ async def process_purchase_with_balance(user_id: int, amount_to_deduct: Decimal,
 
 
 # --- Confirm Pay Handler (Checks Balance, initiates balance payment or refill prompt) ---
-# (handle_confirm_pay function remains unchanged from previous correct version)
+# (handle_confirm_pay function remains unchanged)
 async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Handles the 'Pay Now' button press from the basket."""
     query = update.callback_query
