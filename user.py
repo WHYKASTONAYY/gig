@@ -1084,7 +1084,10 @@ async def handle_leave_review(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["state"] = "awaiting_review"
     enter_review_prompt = lang_data.get("enter_review_prompt", "Please type your review:"); cancel_button_text = lang_data.get("cancel_button", "Cancel"); prompt_msg = f"✍️ {enter_review_prompt}"
     keyboard = [[InlineKeyboardButton(f"❌ {cancel_button_text}", callback_data="reviews")]]
-    try: await query.edit_message_text(prompt_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None); enter_review_answer = lang_data.get("enter_review_answer", "Enter review in chat."); await query.answer(enter_review_answer)
+    try:
+        await query.edit_message_text(prompt_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        enter_review_answer = lang_data.get("enter_review_answer", "Enter review in chat.")
+        await query.answer(enter_review_answer)
     except telegram_error.BadRequest as e:
         if "message is not modified" not in str(e).lower(): logger.error(f"Error editing leave review prompt: {e}"); await send_message_with_retry(context.bot, update.effective_chat.id, prompt_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None); await query.answer()
         else: await query.answer()
@@ -1144,14 +1147,18 @@ async def handle_leave_review_message(update: Update, context: ContextTypes.DEFA
         logger.error(f"DB error saving review user {user_id}: {e}", exc_info=True)
         if conn and conn.in_transaction:
             conn.rollback()
+        # Ensure state is popped even on error
+        context.user_data.pop("state", None)
         await send_message_with_retry(context.bot, chat_id, f"❌ {error_saving_review_db}", parse_mode=None)
-        context.user_data.pop("state", None) # Pop state even on error
+
     except Exception as e:
         logger.error(f"Unexpected error saving review user {user_id}: {e}", exc_info=True)
         if conn and conn.in_transaction:
             conn.rollback()
+        # Ensure state is popped even on error
+        context.user_data.pop("state", None)
         await send_message_with_retry(context.bot, chat_id, f"❌ {error_saving_review_unexpected}", parse_mode=None)
-        context.user_data.pop("state", None) # Pop state even on error
+
     finally:
         if conn: conn.close()
 
@@ -1172,8 +1179,14 @@ async def handle_view_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE
         has_more = len(reviews_data) > reviews_per_page; reviews_to_show = reviews_data[:reviews_per_page]
         for review in reviews_to_show:
             try:
-                date_str = review.get('review_date', ''); formatted_date = unknown_date_label
-                if date_str: try: formatted_date = datetime.fromisoformat(date_str.replace('Z', '+00:00')).strftime("%Y-%m-%d") except ValueError: pass
+                date_str = review.get('review_date', '')
+                formatted_date = unknown_date_label
+                # **Corrected Line:** Indent the try-except block properly
+                if date_str:
+                    try:
+                        formatted_date = datetime.fromisoformat(date_str.replace('Z', '+00:00')).strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass # Keep formatted_date as unknown_date_label if parsing fails
                 username = review.get('username', 'anonymous'); username_display = f"@{username}" if username and username != 'anonymous' else username
                 review_text = review.get('review_text', ''); msg += f"{EMOJI_PROFILE} {username_display} ({formatted_date}):\n{review_text}\n\n"
             except Exception as e: logger.error(f"Error formatting review: {review}, Error: {e}"); msg += f"({error_displaying_review})\n\n"
