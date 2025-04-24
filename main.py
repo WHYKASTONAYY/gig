@@ -19,7 +19,8 @@ from telegram.ext import (
     PicklePersistence, JobQueue
 )
 from telegram.constants import ParseMode
-import telegram.error # Import the base error module directly
+# *** FIXED: Import specific error classes ***
+from telegram.error import Forbidden, BadRequest, NetworkError, RetryAfter, TelegramError
 
 # --- Flask Imports ---
 from flask import Flask, request, Response # Added for webhook server
@@ -33,7 +34,8 @@ from utils import (
     SECONDARY_ADMIN_IDS, WEBHOOK_URL, # Added WEBHOOK_URL
     get_db_connection, # Import the DB connection helper
     DATABASE_PATH, # Import DB path if needed for direct error checks (optional)
-    get_pending_deposit, remove_pending_deposit, get_currency_to_eur_price, FEE_ADJUSTMENT # Import deposit/price utils
+    get_pending_deposit, remove_pending_deposit, get_currency_to_eur_price, FEE_ADJUSTMENT, # Import deposit/price utils
+    send_message_with_retry # Import send_message_with_retry
 )
 from user import (
     start, handle_shop, handle_city_selection, handle_district_selection,
@@ -240,8 +242,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     # as they might not originate from a user chat interaction.
     if chat_id:
         error_message = "An internal error occurred. Please try again later or contact support."
-        # Use direct reference telegram.error.SpecificError
-        if isinstance(context.error, telegram.error.BadRequest):
+        # *** FIXED: Use imported specific error classes ***
+        if isinstance(context.error, BadRequest):
             if "message is not modified" in str(context.error).lower():
                 logger.debug(f"Ignoring 'message is not modified' error for chat {chat_id}.")
                 return # Don't notify user for this specific error
@@ -250,12 +252,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
                 error_message = "An error occurred displaying the message due to formatting. Please try again."
             else:
                  error_message = "An error occurred communicating with Telegram. Please try again."
-        elif isinstance(context.error, telegram.error.NetworkError):
+        elif isinstance(context.error, NetworkError):
             logger.warning(f"Telegram API NetworkError for chat {chat_id} (User: {user_id}): {context.error}")
             error_message = "A network error occurred. Please check your connection and try again."
-        elif isinstance(context.error, telegram.error.Unauthorized): # <-- Use direct path
-             logger.warning(f"Unauthorized error for chat {chat_id} (User: {user_id}): Bot possibly blocked.")
+        elif isinstance(context.error, Forbidden): # <-- FIXED: Use Forbidden for blocked/kicked
+             logger.warning(f"Forbidden error for chat {chat_id} (User: {user_id}): Bot possibly blocked or kicked.")
              # Don't try to send a message if blocked
+             return
+        elif isinstance(context.error, RetryAfter): # <-- Handle RetryAfter
+             retry_seconds = context.error.retry_after + 1
+             logger.warning(f"Rate limit hit during update processing for chat {chat_id}. Error: {context.error}")
+             # Don't send a message back for rate limit errors in handler
              return
         elif isinstance(context.error, sqlite3.Error):
             logger.error(f"Database error during update handling for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
@@ -263,10 +270,15 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         # Handle potential job queue errors (like the NameError we saw before)
         elif isinstance(context.error, NameError):
              logger.error(f"NameError encountered for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
-             error_message = "An internal processing error occurred. Please try again or contact support if it persists."
+             # Check if it's the one we identified
+             if 'clear_expired_basket' in str(context.error):
+                 logger.error("Error likely due to missing import in payment.py.")
+                 error_message = "An internal processing error occurred (payment). Please try again."
+             else:
+                 error_message = "An internal processing error occurred. Please try again or contact support if it persists."
         elif isinstance(context.error, AttributeError): # Catch the specific AttributeError
              logger.error(f"AttributeError encountered for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
-             # Check if it's the one we identified
+             # Check if it's the one we identified for job context
              if "'NoneType' object has no attribute 'get'" in str(context.error) and "_process_collected_media" in str(context.error.__traceback__):
                  logger.error("Error likely due to missing user_data in job context.")
                  error_message = "An internal processing error occurred (media group). Please try again."
@@ -281,7 +293,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             # Use the application instance stored globally if context.bot is not available
             bot_instance = context.bot if hasattr(context, 'bot') else (telegram_app.bot if telegram_app else None)
             if bot_instance:
-                 await bot_instance.send_message(chat_id=chat_id, text=error_message, parse_mode=None)
+                 # Use send_message_with_retry for resilience
+                 await send_message_with_retry(bot_instance, chat_id, error_message, parse_mode=None)
             else:
                  logger.error("Could not get bot instance to send error message.")
         except Exception as e:
