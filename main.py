@@ -1,4 +1,6 @@
 
+# --- START OF FILE main.py ---
+
 import logging
 import asyncio
 import os
@@ -31,11 +33,13 @@ import nest_asyncio # Added for running flask in thread
 
 # --- Local Imports ---
 # Ensure utils is imported first to initialize DB and load data
+# Importing the whole module allows access like utils.VARIABLE
 import utils
 from utils import (
-    TOKEN, ADMIN_ID, init_db, load_all_data, LANGUAGES, THEMES,
+    # TOKEN, ADMIN_ID, # No longer need direct import for main checks
+    init_db, load_all_data, LANGUAGES, THEMES,
     SUPPORT_USERNAME, BASKET_TIMEOUT, clear_all_expired_baskets,
-    SECONDARY_ADMIN_IDS, WEBHOOK_URL, # Added WEBHOOK_URL
+    SECONDARY_ADMIN_IDS, # WEBHOOK_URL, NOWPAYMENTS_API_KEY # No longer need direct import
     get_db_connection, DATABASE_PATH,
     get_pending_deposit, remove_pending_deposit, # Added DB helpers
     FEE_ADJUSTMENT, get_currency_to_eur_price # Added Fee and Price utils
@@ -50,7 +54,6 @@ from user import (
     handle_user_discount_code_message, apply_discount_start, remove_discount,
     handle_leave_review_now, handle_refill, handle_view_history,
     handle_refill_amount_message,
-    # REMOVED: handle_withdrawal_request, process_withdrawal_message
 )
 from admin import (
     handle_admin_menu, handle_sales_analytics_menu, handle_sales_dashboard,
@@ -76,7 +79,7 @@ from admin import (
     handle_adm_discount_code_message, handle_adm_discount_value_message,
     handle_adm_broadcast_start, handle_adm_broadcast_message,
     handle_confirm_broadcast, handle_cancel_broadcast,
-    handle_adm_manage_reviews, handle_adm_delete_review_confirm # Add missing admin handlers
+    handle_adm_manage_reviews, handle_adm_delete_review_confirm
 )
 from viewer_admin import (
     handle_viewer_admin_menu,
@@ -85,41 +88,37 @@ from viewer_admin import (
 )
 from payment import (
     handle_confirm_pay,
-    close_cryptopay_client, # Keep this (though it does nothing now)
+    close_cryptopay_client,
     handle_select_refill_crypto,
-    process_successful_refill # Import needed for webhook
-    # REMOVED: handle_check_cryptobot_payment
+    process_successful_refill
 )
 from stock import handle_view_stock
 
 # --- Logging Setup ---
-# Configure logging (consider moving basicConfig to utils if used across modules)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logging.getLogger("httpx").setLevel(logging.WARNING) # Silence PTB's http library logs
-logging.getLogger("werkzeug").setLevel(logging.WARNING) # Silence Flask logs unless WARNING
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Allow nested asyncio loops for running Flask in a thread with PTB's loop
+# Allow nested asyncio loops
 nest_asyncio.apply()
 
 # --- Flask App for Webhook ---
 flask_app = Flask(__name__)
-# Global variable to hold the Telegram Application instance for the webhook handler
 telegram_app: Application | None = None
 
 @flask_app.route('/webhook', methods=['POST'])
 def nowpayments_webhook():
     """Handles incoming webhook notifications from NOWPayments."""
-    global telegram_app # Use the global application instance
+    global telegram_app
     if not request.is_json:
         logger.warning("Webhook received non-JSON request.")
         return Response("Request must be JSON", status=415)
 
     data = request.json
-    # Use json.dumps for potentially large/nested data logging
     logger.info(f"Received NOWPayments IPN: {json.dumps(data, indent=2)}")
 
     if not telegram_app:
@@ -128,14 +127,13 @@ def nowpayments_webhook():
 
     payment_id = data.get('payment_id')
     payment_status = data.get('payment_status')
-    paid_amount_str = data.get('actually_paid') # Amount paid in crypto (as string or number)
-    pay_currency = data.get('pay_currency') # Crypto currency code
+    paid_amount_str = data.get('actually_paid')
+    pay_currency = data.get('pay_currency')
 
     if not payment_id:
         logger.warning("Webhook received without payment_id.")
         return Response("Missing payment_id", status=400)
 
-    # Process based on status (adjust statuses based on NOWPayments docs if needed)
     if payment_status == 'finished':
         if paid_amount_str is None or not pay_currency:
              logger.error(f"Webhook 'finished' status missing paid amount or currency for {payment_id}.")
@@ -147,48 +145,37 @@ def nowpayments_webhook():
              logger.error(f"Invalid paid amount format '{paid_amount_str}' for payment {payment_id}.")
              return Response("Invalid amount format", status=400)
 
-        # Fetch pending deposit info (runs sync DB query)
-        pending_info = get_pending_deposit(str(payment_id))
+        # Use utils function for DB interaction
+        pending_info = utils.get_pending_deposit(str(payment_id))
 
         if pending_info:
             user_id = pending_info['user_id']
-            # Convert paid crypto amount to EUR
-            price_eur = get_currency_to_eur_price(pay_currency) # Uses function from utils
+            # Use utils function for price fetching
+            price_eur = utils.get_currency_to_eur_price(pay_currency)
 
             if price_eur and price_eur > 0:
                 eur_equiv_dec = (paid_amount_dec * price_eur)
-                # Apply fee adjustment (example: 1.5% fee)
-                credited_eur_amount = eur_equiv_dec * (Decimal('1.0') - FEE_ADJUSTMENT)
-                credited_eur_amount = credited_eur_amount.quantize(Decimal("0.01")) # Round to 2 decimal places
+                # Use utils constant for fee adjustment
+                credited_eur_amount = eur_equiv_dec * (Decimal('1.0') - utils.FEE_ADJUSTMENT)
+                credited_eur_amount = credited_eur_amount.quantize(Decimal("0.01"))
 
-                # Ensure credited amount is positive after fees
                 if credited_eur_amount <= Decimal('0.0'):
                      logger.warning(f"Credited EUR amount for payment {payment_id} is zero or negative after fee adjustment. Original EUR equivalent: {eur_equiv_dec:.4f}. Not crediting balance.")
-                     # Remove pending record even if not crediting, as payment finished
-                     remove_pending_deposit(str(payment_id))
-                     return Response(status=200) # Acknowledge webhook, but take no crediting action
+                     utils.remove_pending_deposit(str(payment_id)) # Remove pending record
+                     return Response(status=200)
 
                 logger.info(f"Processing successful deposit {payment_id} for user {user_id}. Paid: {paid_amount_dec} {pay_currency}, EUR equivalent: {eur_equiv_dec:.4f}, Credited (after fees): {credited_eur_amount:.2f}")
 
-                # Run the balance update and notification in the bot's event loop
                 async def process_in_loop():
-                    # Create a minimal context for process_successful_refill
-                    # We don't have the full chat/user context here, only user_id
                     bot_context = ContextTypes.DEFAULT_TYPE(application=telegram_app, user_id=user_id)
-                    # Manually set bot instance and potentially fetch user_data if needed for language
                     bot_context._bot = telegram_app.bot
-                    # bot_context.user_data = await telegram_app.persistence.get_user_data() # Example if needed
-
                     success = await process_successful_refill(user_id, credited_eur_amount, str(payment_id), bot_context)
                     if success:
-                        # Remove pending record ONLY after successful processing
-                        remove_pending_deposit(str(payment_id))
+                        utils.remove_pending_deposit(str(payment_id)) # Use utils function
                     else:
                         logger.error(f"Failed to process successful refill in DB for payment {payment_id}, user {user_id}. Pending record NOT removed.")
-                        # Consider sending an alert to admin if DB update fails
 
                 try:
-                    # Get the running event loop from the main thread where PTB runs
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                          asyncio.run_coroutine_threadsafe(process_in_loop(), loop)
@@ -201,20 +188,17 @@ def nowpayments_webhook():
 
             else:
                 logger.error(f"Could not get EUR price for {pay_currency} to process payment {payment_id}. Deposit pending manual review.")
-                # Optionally notify admin
         else:
             logger.warning(f"Received 'finished' webhook for unknown or already processed payment_id: {payment_id}")
 
     elif payment_status in ['failed', 'refunded', 'expired']:
         logger.warning(f"Received non-successful payment status '{payment_status}' for payment_id: {payment_id}. Removing pending record.")
-        # Clean up pending record (runs sync DB query)
-        remove_pending_deposit(str(payment_id))
-        # Optionally notify user or admin about the failure/expiry
+        utils.remove_pending_deposit(str(payment_id)) # Use utils function
 
     else:
          logger.info(f"Received webhook with status '{payment_status}' for payment_id: {payment_id}. No action taken.")
 
-    return Response(status=200) # Always return 200 OK to NOWPayments
+    return Response(status=200) # Always return 200 OK
 
 # --- Callback Data Parsing Decorator ---
 # Maps callback data prefixes to handler functions
@@ -288,11 +272,10 @@ def callback_query_router(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         if query and query.data:
-            # Ensure query is answered to remove loading state
             try: await query.answer()
             except Exception as e: logger.debug(f"Minor error answering CBQ {query.data}: {e}")
 
-            parts = query.data.split('|', 1) # Split only once
+            parts = query.data.split('|', 1)
             command = parts[0]
             params_str = parts[1] if len(parts) > 1 else ""
             params = params_str.split('|') if params_str else []
@@ -303,9 +286,8 @@ def callback_query_router(func):
                     await target_func(update, context, params)
                 except Exception as e:
                      logger.error(f"Error executing callback handler '{command}': {e}", exc_info=True)
-                     # Optionally notify user of error
                      try: await query.edit_message_text("An error occurred processing your request.")
-                     except Exception: pass # Ignore if edit fails
+                     except Exception: pass
             else:
                 logger.warning(f"No async handler found for callback command: {command}")
                 try: await query.answer("Unknown action.", show_alert=True)
@@ -315,15 +297,12 @@ def callback_query_router(func):
             try: await query.answer()
             except Exception as e: logger.error(f"Error answering CBQ without data: {e}")
         else:
-            # This case should ideally not happen with CallbackQueryHandler
             logger.warning("Callback query handler received update without query object.")
     return wrapper
 
 @callback_query_router
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This function body is now effectively empty as the decorator handles everything.
-    # It's kept for clarity as the entry point for the handler.
-    pass
+    pass # Decorator handles routing
 
 # --- Central Message Handler (for states) ---
 # Maps state names to handler functions
@@ -332,7 +311,6 @@ STATE_HANDLERS = {
     'awaiting_review': handle_leave_review_message,
     'awaiting_user_discount_code': handle_user_discount_code_message,
     'awaiting_refill_amount': handle_refill_amount_message,
-    # REMOVED: 'awaiting_withdrawal_details': process_withdrawal_message,
     # Admin States
     'awaiting_new_city_name': handle_adm_add_city_message,
     'awaiting_edit_city_name': handle_adm_edit_city_message,
@@ -350,7 +328,7 @@ STATE_HANDLERS = {
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles incoming text/media messages based on user state."""
-    if not update.message or not update.effective_user: return # Ignore updates without messages or users
+    if not update.message or not update.effective_user: return
 
     user_id = update.effective_user.id
     state = context.user_data.get('state')
@@ -362,54 +340,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handler_func(update, context)
         except Exception as e:
             logger.error(f"Error executing state handler '{state}' for user {user_id}: {e}", exc_info=True)
-            # Optionally clear state on error?
-            # context.user_data.pop('state', None)
-            try: # Notify user of error
+            try:
                 await update.message.reply_text("An error occurred processing your input. Please try again or /start.")
             except Exception: pass
     else:
-        # Ignore messages if user is not in a specific state needing input
         logger.debug(f"Ignoring message from user {user_id} in state: {state or 'None'}")
-        # You might want to add a default reply here if users send unexpected messages
-        # e.g., await update.message.reply_text("I didn't understand that. Use /start to see options.")
 
 # --- Error Handler ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs errors and sends a generic error message to the user."""
-    # Log the error before handling it
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
-    # Extract chat_id if possible
     chat_id = None
     if isinstance(update, Update) and update.effective_chat:
         chat_id = update.effective_chat.id
 
-    # Prepare error message (consider translation if needed)
     error_message = "An internal error occurred. Please try again later or contact support."
-    if SUPPORT_USERNAME:
-        error_message += f" (@{SUPPORT_USERNAME})"
+    if utils.SUPPORT_USERNAME: # Access via utils
+        error_message += f" (@{utils.SUPPORT_USERNAME})"
 
-    # Handle specific error types if necessary (optional)
     if isinstance(context.error, telegram_error.BadRequest):
-        # e.g., Message not modified, chat not found, etc.
-        # Might not always need to notify the user for these.
         logger.warning(f"BadRequest error: {context.error}")
-        # Avoid sending message for "message not modified"
         if "message is not modified" in str(context.error).lower():
             return
     elif isinstance(context.error, telegram_error.Unauthorized):
         logger.warning(f"Unauthorized error (bot blocked?): {context.error}")
-        # Can't send a message if blocked
         return
     elif isinstance(context.error, telegram_error.NetworkError):
         logger.warning(f"Network error: {context.error}")
-        # Maybe just log network errors unless they persist
 
-    # Send user-friendly error message if possible
     if chat_id:
         try:
-            # Use the reliable send function
-            await send_message_with_retry(context.bot, chat_id=chat_id, text=error_message, parse_mode=None)
+            # Use the reliable send function from utils
+            await utils.send_message_with_retry(context.bot, chat_id=chat_id, text=error_message, parse_mode=None)
         except Exception as e:
             logger.error(f"Failed even to send error message to user {chat_id}: {e}")
 
@@ -417,14 +380,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def post_init(application: Application) -> None:
     """Actions to perform after the Application is built and initialized."""
     logger.info("Running post_init setup...")
-
-    # Set bot commands
     logger.info("Setting bot commands...")
-    commands = [
-        BotCommand("start", "Start the bot / Main menu"),
-    ]
-    # Add admin command only if ADMIN_ID is set
-    if ADMIN_ID is not None:
+    commands = [ BotCommand("start", "Start the bot / Main menu"), ]
+    # Access ADMIN_ID via utils
+    if utils.ADMIN_ID is not None:
         commands.append(BotCommand("admin", "Access admin panel (Admin only)"))
 
     try:
@@ -433,18 +392,17 @@ async def post_init(application: Application) -> None:
     except Exception as e:
         logger.error(f"Failed to set bot commands: {e}")
 
-    # Set up background job for clearing expired baskets
-    if BASKET_TIMEOUT > 0:
+    # Access BASKET_TIMEOUT via utils
+    if utils.BASKET_TIMEOUT > 0:
         job_queue = application.job_queue
         if job_queue:
-            # Check if job already exists
             current_jobs = job_queue.get_jobs_by_name("clear_baskets")
             if not current_jobs:
                 logger.info(f"Setting up background job 'clear_baskets' (interval: 60s)...")
                 job_queue.run_repeating(
                     clear_expired_baskets_job,
                     interval=timedelta(seconds=60),
-                    first=timedelta(seconds=10), # Start after 10 seconds
+                    first=timedelta(seconds=10),
                     name="clear_baskets"
                 )
                 logger.info("Background job 'clear_baskets' scheduled.")
@@ -453,23 +411,22 @@ async def post_init(application: Application) -> None:
         else:
             logger.warning("Job Queue is not available. Expired baskets will not be cleared automatically.")
     else:
-        logger.warning("BASKET_TIMEOUT is not positive. Skipping background job setup for expired baskets.")
+        logger.warning("utils.BASKET_TIMEOUT is not positive. Skipping background job setup for expired baskets.")
 
     logger.info("Post_init finished.")
 
 async def post_shutdown(application: Application) -> None:
     """Actions to perform during graceful shutdown."""
     logger.info("Running post_shutdown cleanup...")
-    # Placeholder for closing any external clients (like CryptoPay if it were used)
-    await close_cryptopay_client()
+    await close_cryptopay_client() # Close external clients if any
     logger.info("Post_shutdown finished.")
 
 async def clear_expired_baskets_job(context: ContextTypes.DEFAULT_TYPE):
     """Job function to clear expired baskets for all users."""
     logger.debug("Running background job: clear_expired_baskets_job")
     try:
-         # Run the synchronous DB operation in a thread to avoid blocking asyncio loop
-         await asyncio.to_thread(clear_all_expired_baskets)
+         # Access clear_all_expired_baskets via utils
+         await asyncio.to_thread(utils.clear_all_expired_baskets)
          logger.info("Background job: Cleared expired baskets successfully.")
     except Exception as e:
           logger.error(f"Error in background job clear_expired_baskets_job: {e}", exc_info=True)
@@ -477,70 +434,53 @@ async def clear_expired_baskets_job(context: ContextTypes.DEFAULT_TYPE):
 # --- Main Function (Webhook setup) ---
 def main() -> None:
     """Configures and runs the bot with webhook."""
-    global telegram_app # Make application instance accessible to webhook
+    global telegram_app
 
     logger.info("Starting bot application...")
 
-    # --- Essential Configuration Checks ---
-    if not TOKEN:
+    # --- Essential Configuration Checks (using utils) ---
+    if not utils.TOKEN:
         logger.critical("CRITICAL: Telegram Bot TOKEN is not set in environment variables.")
         raise SystemExit("Missing TOKEN")
-    if not WEBHOOK_URL:
+    if not utils.WEBHOOK_URL:
         logger.critical("CRITICAL: WEBHOOK_URL is not set. Cannot run in webhook mode.")
         raise SystemExit("Missing WEBHOOK_URL for webhook mode.")
-    if not NOWPAYMENTS_API_KEY:
+    if not utils.NOWPAYMENTS_API_KEY:
         logger.warning("NOWPAYMENTS_API_KEY is not set. Deposit functionality will fail.")
-    if ADMIN_ID is None:
+    if utils.ADMIN_ID is None:
          logger.warning("ADMIN_ID is not set. Admin functionality will be limited.")
     # --- End Checks ---
 
-    # Default settings for handlers
-    defaults = Defaults(parse_mode=None, block=False) # Default to no parse mode
+    defaults = Defaults(parse_mode=None, block=False)
 
-    # Build the PTB application
-    # No persistence needed for webhook mode usually, state managed in memory/context
     application = (
-        ApplicationBuilder().token(TOKEN).defaults(defaults)
+        ApplicationBuilder().token(utils.TOKEN).defaults(defaults) # Use utils.TOKEN
         .post_init(post_init).post_shutdown(post_shutdown).build()
     )
-    telegram_app = application # Store globally for Flask webhook
+    telegram_app = application
 
     # --- Add Handlers ---
-    # Commands
     application.add_handler(CommandHandler("start", start))
-    if ADMIN_ID is not None: # Only add admin command if ADMIN_ID is set
+    if utils.ADMIN_ID is not None: # Use utils.ADMIN_ID
         application.add_handler(CommandHandler("admin", handle_admin_menu))
-
-    # Callback Queries (Routed by decorator)
     application.add_handler(CallbackQueryHandler(handle_callback_query))
-
-    # Message Handler (for states)
     application.add_handler(MessageHandler(
-        # Handle text, photos, videos, GIFs (animations), documents (for potential GIFs)
-        # Exclude commands unless explicitly needed for a state
         (filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL,
         handle_message
     ))
-
-    # Error Handler (must be last)
     application.add_error_handler(error_handler)
     # --- End Handlers ---
 
     # --- Webhook and Flask Setup ---
-    # Get the asyncio event loop
     loop = asyncio.get_event_loop()
 
     async def setup_telegram_webhook():
         logger.info("Initializing Telegram Application and setting webhook...")
         try:
-            await application.initialize() # Initialize bot internals
-
-            # Construct the full webhook URL for Telegram
-            # Note: Render might provide the base URL via WEBHOOK_URL, ensure it ends with '/' if needed
-            # Or construct it fully if WEBHOOK_URL is just the domain.
-            # Example: Assuming WEBHOOK_URL is 'https://yourapp.onrender.com'
-            base_url = WEBHOOK_URL.rstrip('/')
-            telegram_hook_path = f"/telegram/{TOKEN}" # Path PTB listens on internally
+            await application.initialize()
+            # Access WEBHOOK_URL and TOKEN via utils
+            base_url = utils.WEBHOOK_URL.rstrip('/')
+            telegram_hook_path = f"/telegram/{utils.TOKEN}"
             full_webhook_url = f"{base_url}{telegram_hook_path}"
 
             webhook_info = await application.bot.get_webhook_info()
@@ -549,10 +489,9 @@ def main() -> None:
                 logger.info(f"Setting webhook URL to: {full_webhook_url}")
                 if not await application.bot.set_webhook(url=full_webhook_url, allowed_updates=Update.ALL_TYPES):
                     logger.error("Failed to set webhook.")
-                    return False # Indicate failure
+                    return False
                 else:
                     logger.info("Webhook set successfully.")
-                    # Verify again
                     webhook_info = await application.bot.get_webhook_info()
                     if webhook_info.url == full_webhook_url:
                          logger.info("Webhook verified successfully.")
@@ -562,24 +501,21 @@ def main() -> None:
             else:
                 logger.info(f"Webhook already set to: {webhook_info.url}")
 
-            await application.start() # Start polling internally for webhook updates
+            await application.start()
             logger.info("Telegram Application started and listening for webhook updates.")
-            return True # Indicate success
+            return True
 
         except Exception as e:
             logger.critical(f"Failed during Telegram webhook setup: {e}", exc_info=True)
-            return False # Indicate failure
+            return False
 
-    # Run the async setup in the event loop
     setup_success = loop.run_until_complete(setup_telegram_webhook())
     if not setup_success:
          logger.critical("Exiting due to failed Telegram setup.")
          raise SystemExit("Telegram setup failed")
 
-
-    # Define the Telegram webhook endpoint for Flask
-    # The path MUST match where PTB expects updates internally
-    @flask_app.route(f'/telegram/{TOKEN}', methods=['POST'])
+    # Access TOKEN via utils
+    @flask_app.route(f'/telegram/{utils.TOKEN}', methods=['POST'])
     def telegram_webhook_handler():
         """Handles incoming updates from Telegram forwarded by the webserver."""
         if not telegram_app:
@@ -588,38 +524,32 @@ def main() -> None:
         try:
             update_data = request.get_json(force=True)
             update = Update.de_json(update_data, telegram_app.bot)
-            # Schedule the update processing in PTB's event loop
             asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
-            return Response(status=200) # OK back to Telegram
+            return Response(status=200)
         except Exception as e:
             logger.error(f"Error processing incoming Telegram update in Flask: {e}", exc_info=True)
-            return Response(status=500) # Internal server error
+            return Response(status=500)
 
-    # Start Flask server in a separate thread
-    # Use Render's PORT environment variable
     port = int(os.environ.get("PORT", 8080))
     flask_thread = threading.Thread(
         target=lambda: flask_app.run(host='0.0.0.0', port=port),
-        daemon=True # Allows main thread to exit even if Flask is running
+        daemon=True
     )
     flask_thread.start()
-    logger.info(f"Flask webhook server started on port {port}. Listening for Telegram at /telegram/{TOKEN} and NOWPayments at /webhook.")
+    logger.info(f"Flask webhook server started on port {port}. Listening for Telegram at /telegram/{utils.TOKEN} and NOWPayments at /webhook.") # Use utils.TOKEN
 
-    # Keep the main thread alive (PTB runs in the asyncio loop managed by Application)
     try:
-        # loop.run_forever() # Alternative: run the main loop forever
         while True:
-             time.sleep(3600) # Sleep for a long time, main work is in asyncio loop / Flask thread
-             logger.debug("Main thread still alive...") # Optional debug message
+             time.sleep(3600)
+             logger.debug("Main thread still alive...")
     except (KeyboardInterrupt, SystemExit) as e:
         logger.info(f"Shutdown signal ({type(e).__name__}) received. Stopping application...")
-        # Signal PTB to stop gracefully
-        asyncio.run_coroutine_threadsafe(application.stop(), loop)
-        # Wait for the loop to finish processing stop tasks
-        # loop.run_until_complete(loop.shutdown_asyncgens()) # Optional cleanup
-        # loop.close() # Close the loop
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(application.stop(), loop)
+            # Give loop time to process stop()
+            # loop.run_until_complete(asyncio.sleep(1)) # Optional wait
+            # loop.close() # Closing loop might cause issues if Flask thread still uses it
         logger.info("Application stop signal sent.")
-        # Flask thread is daemon, should exit automatically
 
 if __name__ == '__main__':
     try:
@@ -630,3 +560,5 @@ if __name__ == '__main__':
         logger.critical(f"Bot stopped due to SystemExit: {e}")
     except Exception as e:
         logger.critical(f"Critical error in main execution: {e}", exc_info=True)
+
+# --- END OF FILE main.py ---
