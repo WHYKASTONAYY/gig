@@ -1,5 +1,3 @@
-# --- START OF FILE utils.py ---
-
 import sqlite3
 import time
 import os
@@ -9,7 +7,7 @@ import shutil
 import tempfile
 import asyncio
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_DOWN # Use Decimal for financial calculations
+from decimal import Decimal, ROUND_DOWN, ROUND_UP # Added ROUND_UP
 import requests # Added for API calls
 
 # --- Telegram Imports ---
@@ -87,8 +85,12 @@ THEMES = { # Keep themes as is
     "nature": {"product": "🌿", "basket": "🧺", "review": "🌸"}
 }
 LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
+    # --- English ---
     "en": {
         "native_name": "English",
+        # ... (keep all existing EN translations) ...
+        "payment_amount_too_low_api": "❌ Payment Amount Too Low: The equivalent of {target_eur_amount} EUR in {currency} ({crypto_amount}) is below the minimum required by the payment provider ({min_amount} {currency}). Please try a higher EUR amount.", # Added specific error message
+        "error_min_amount_fetch": "❌ Error: Could not retrieve minimum payment amount for {currency}. Please try again later or select a different currency.", # Added
         "welcome": "👋 Welcome, {username}!",
         "profile": "🎉 Your Profile\n\n👤 Status: {status} {progress_bar}\n💰 Balance: {balance} EUR\n📦 Total Purchases: {purchases}\n🛒 Basket Items: {basket}",
         "refill": "💸 Top Up Your Balance\n\nChoose a payment method below:",
@@ -269,15 +271,24 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
         "error_invalid_nowpayments_response": "❌ Payment API Error: Invalid response received. Please contact support.",
         "error_nowpayments_api_key": "❌ Payment API Error: Invalid API key. Please contact support.",
         "payment_pending_db_error": "❌ Database Error: Could not record pending payment. Please contact support.",
-        "payment_amount_too_low_api": "❌ Payment Amount Too Low: The required crypto amount is below the minimum allowed by the payment provider for {currency}. Please try a higher EUR amount.",
         "webhook_processing_error": "Webhook Error: Could not process payment update {payment_id}.",
         "webhook_db_update_failed": "Critical Error: Payment {payment_id} confirmed, but DB balance update failed for user {user_id}. Manual action required.",
         "webhook_pending_not_found": "Webhook Warning: Received update for payment ID {payment_id}, but no pending deposit found in DB.",
         "webhook_price_fetch_error": "Webhook Error: Could not fetch price for {currency} to confirm EUR value for payment {payment_id}.",
         "payment_cancelled_or_expired": "Payment Status: Your payment ({payment_id}) was cancelled or expired.",
+        "set_media_prompt_plain": "📸 Send a photo, video, or GIF to display above all messages:",
+        "state_error": "❌ Error: Invalid State. Please start the 'Add New Product' process again from the Admin Panel.",
+        "review_prompt": "🎉 Thank you for your purchase! We’d love to hear your feedback. Would you like to leave a review now or later?",
+        "payment_failed": "❌ Payment Failed! Please try again or contact {support}. 📞",
+        "support": "📞 Need Help? Contact {support}!",
+        "file_download_error": "❌ Error: Failed to Download Media. Please try again or contact {support}.",
     },
-    "lt": { # --- Lithuanian translations ---
+    # ... Add lt and ru translations here, ensuring the new keys are included ...
+    "lt": {
         "native_name": "Lietuvių",
+        "payment_amount_too_low_api": "❌ Mokėjimo Suma Per Maža: Reikalinga {currency} suma ({crypto_amount}) yra mažesnė už minimalią mokėjimo tiekėjo leistiną sumą ({min_amount} {currency}). Bandykite didesnę EUR sumą.",
+        "error_min_amount_fetch": "❌ Klaida: Nepavyko gauti minimalios mokėjimo sumos {currency}. Bandykite vėliau arba pasirinkite kitą valiutą.",
+        # ... (rest of Lithuanian translations) ...
         "welcome": "👋 Sveiki, {username}!",
         "status_label": "Statusas",
         "balance_label": "Balansas",
@@ -438,7 +449,6 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
         "error_invalid_nowpayments_response": "❌ Mokėjimo API klaida: Gautas neteisingas atsakymas. Susisiekite su palaikymo tarnyba.",
         "error_nowpayments_api_key": "❌ Mokėjimo API klaida: Neteisingas API raktas. Susisiekite su palaikymo tarnyba.",
         "payment_pending_db_error": "❌ Duomenų bazės klaida: Nepavyko įrašyti laukiančio mokėjimo. Susisiekite su palaikymo tarnyba.",
-        "payment_amount_too_low_api": "❌ Mokėjimo suma per maža: Reikalinga kriptovaliutos suma yra mažesnė už minimalią leistiną mokėjimo tiekėjo {currency}. Bandykite didesnę EUR sumą.",
         "webhook_processing_error": "Webhook klaida: Nepavyko apdoroti mokėjimo atnaujinimo {payment_id}.",
         "webhook_db_update_failed": "Kritinė klaida: Mokėjimas {payment_id} patvirtintas, bet DB balanso atnaujinimas nepavyko vartotojui {user_id}. Reikalingas rankinis veiksmas.",
         "webhook_pending_not_found": "Webhook įspėjimas: Gautas atnaujinimas mokėjimo ID {payment_id}, bet DB nerastas laukiantis indėlis.",
@@ -453,6 +463,9 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
     },
     "ru": { # --- Russian translations ---
         "native_name": "Русский",
+        "payment_amount_too_low_api": "❌ Сумма платежа слишком мала: Требуемая сумма в {currency} ({crypto_amount}) меньше минимально допустимой платежным провайдером ({min_amount} {currency}). Пожалуйста, попробуйте большую сумму в EUR.",
+        "error_min_amount_fetch": "❌ Ошибка: Не удалось получить минимальную сумму платежа для {currency}. Пожалуйста, попробуйте позже или выберите другую валюту.",
+        # ... (rest of Russian translations) ...
         "welcome": "👋 Добро пожаловать, {username}!",
         "status_label": "Статус",
         "balance_label": "Баланс",
@@ -613,7 +626,6 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
         "error_invalid_nowpayments_response": "❌ Ошибка API платежей: Получен неверный ответ. Свяжитесь с поддержкой.",
         "error_nowpayments_api_key": "❌ Ошибка API платежей: Неверный API ключ. Свяжитесь с поддержкой.",
         "payment_pending_db_error": "❌ Ошибка БД: Не удалось записать ожидающий платеж. Свяжитесь с поддержкой.",
-        "payment_amount_too_low_api": "❌ Сумма платежа слишком мала: Требуемая сумма в криптовалюте ниже минимума, допустимого платежным провайдером для {currency}. Попробуйте большую сумму в EUR.",
         "webhook_processing_error": "Ошибка Webhook: Не удалось обработать обновление платежа {payment_id}.",
         "webhook_db_update_failed": "Критическая ошибка: Платеж {payment_id} подтвержден, но обновление баланса в БД не удалось для пользователя {user_id}. Требуется ручное вмешательство.",
         "webhook_pending_not_found": "Предупреждение Webhook: Получено обновление для платежа ID {payment_id}, но ожидающий депозит не найден в БД.",
@@ -642,7 +654,8 @@ PRODUCT_TYPES = []
 SIZES = ["2g", "5g"]
 BOT_MEDIA = {'type': None, 'path': None}
 currency_price_cache = {} # Simple in-memory cache for CoinGecko prices
-CACHE_EXPIRY_SECONDS = 300 # Cache prices for 5 minutes
+min_amount_cache = {} # Simple in-memory cache for NOWPayments minimum amounts
+CACHE_EXPIRY_SECONDS = 300 # Cache prices/minimums for 5 minutes
 
 
 # --- Database Connection Helper ---
@@ -958,7 +971,7 @@ def get_date_range(period_key):
 def get_user_status(purchases):
     """Determines user status ('New', 'Regular', 'VIP') based on purchase count."""
     try:
-        p_int = int(purchases);
+        p_int = int(purchases)
         if p_int >= 10: return "VIP 👑"
         elif p_int >= 5: return "Regular ⭐"
         else: return "New 🌱"
@@ -1113,6 +1126,52 @@ def get_currency_to_eur_price(currency_code: str) -> Decimal | None:
         logger.error(f"Error parsing CoinGecko response for {currency_code_lower}: {e}")
         return None
 
+# --- NEW: Get NOWPayments Minimum Amount ---
+def get_nowpayments_min_amount(currency_code: str) -> Decimal | None:
+    """Gets the minimum payment amount for a specific currency from NOWPayments API with caching."""
+    currency_code_lower = currency_code.lower()
+    now = time.time()
+
+    # Check cache first
+    if currency_code_lower in min_amount_cache:
+        min_amount, timestamp = min_amount_cache[currency_code_lower]
+        if now - timestamp < CACHE_EXPIRY_SECONDS * 2: # Cache min amount longer (e.g., 10 min)
+            logger.debug(f"Cache hit for {currency_code_lower} min amount: {min_amount}")
+            return min_amount
+
+    if not NOWPAYMENTS_API_KEY:
+        logger.error("NOWPayments API key is missing, cannot fetch minimum amount.")
+        return None
+
+    # Fetch from NOWPayments API
+    try:
+        url = f"{NOWPAYMENTS_API_URL}/v1/min-amount"
+        params = {'currency_from': currency_code_lower}
+        headers = {'x-api-key': NOWPAYMENTS_API_KEY}
+
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if 'min_amount' in data:
+            min_amount = Decimal(str(data['min_amount']))
+            min_amount_cache[currency_code_lower] = (min_amount, now) # Update cache
+            logger.info(f"Fetched minimum amount for {currency_code_lower}: {min_amount} from NOWPayments.")
+            return min_amount
+        else:
+            logger.warning(f"Could not find 'min_amount' for {currency_code_lower} in NOWPayments response: {data}")
+            return None
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout fetching minimum amount for {currency_code_lower} from NOWPayments.")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching minimum amount for {currency_code_lower} from NOWPayments: {e}")
+        return None
+    except (KeyError, ValueError, json.JSONDecodeError) as e:
+        logger.error(f"Error parsing NOWPayments min amount response for {currency_code_lower}: {e}")
+        return None
+# --- END NEW FUNCTION ---
+
 def format_expiration_time(expiration_date_str: str | None) -> str:
     """Formats an ISO expiration date string into a human-readable HH:MM:SS format."""
     if not expiration_date_str:
@@ -1139,5 +1198,3 @@ async def handle_coming_soon(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # --- Initial Data Load ---
 init_db() # Ensure DB schema exists before loading
 load_all_data() # Load cities, districts, types
-
-# --- END OF FILE utils.py ---
