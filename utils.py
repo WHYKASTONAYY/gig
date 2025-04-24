@@ -284,7 +284,7 @@ LANGUAGES = { # Keep languages as is (ensure consistency with provided example)
         "support": "📞 Need Help? Contact {support}!",
         "file_download_error": "❌ Error: Failed to Download Media. Please try again or contact {support}.",
     },
-    "lt": {
+    "lt": { # --- Lithuanian translations ---
         "native_name": "Lietuvių",
         "payment_amount_too_low_api": "❌ Mokėjimo Suma Per Maža: {target_eur_amount} EUR atitikmuo {currency} ({crypto_amount}) yra mažesnis už minimalią mokėjimo tiekėjo reikalaujamą sumą ({min_amount} {currency})\\. Bandykite didesnę EUR sumą\\.",
         "error_min_amount_fetch": "❌ Klaida: Nepavyko gauti minimalios mokėjimo sumos {currency}\\. Bandykite vėliau arba pasirinkite kitą valiutą\\.",
@@ -1150,30 +1150,33 @@ def get_nowpayments_min_amount(currency_code: str) -> Decimal | None:
     # Fetch from NOWPayments API
     try:
         url = f"{NOWPAYMENTS_API_URL}/v1/min-amount"
-        params = {'currency_from': currency_code_lower, 'fiat_currency': 'eur'} # Added fiat_currency for context if needed
+        # *** CORRECTED: Removed fiat_currency parameter ***
+        params = {'currency_from': currency_code_lower}
         headers = {'x-api-key': NOWPAYMENTS_API_KEY}
 
+        logger.debug(f"Fetching min amount for {currency_code_lower} from {url} with params {params}")
         response = requests.get(url, params=params, headers=headers, timeout=10)
-        response.raise_for_status()
+        logger.debug(f"NOWPayments min-amount response status: {response.status_code}, content: {response.text[:200]}")
+        response.raise_for_status() # Check for HTTP errors
         data = response.json()
 
-        # API might return min_amount OR min_amount_EUR, prioritize min_amount if present
-        min_amount_key = 'min_amount'
+        # NOWPayments response structure might vary slightly, check keys carefully
+        min_amount_key = 'min_amount' # This seems to be the correct key
         if min_amount_key in data and data[min_amount_key] is not None:
             min_amount = Decimal(str(data[min_amount_key]))
             min_amount_cache[currency_code_lower] = (min_amount, now) # Update cache
             logger.info(f"Fetched minimum amount for {currency_code_lower}: {min_amount} from NOWPayments.")
             return min_amount
         else:
-            # Fallback or specific error logging
-            logger.warning(f"Could not find 'min_amount' for {currency_code_lower} in NOWPayments response: {data}")
-            return None # Or handle potentially using min_amount_EUR if that's relevant
+            logger.warning(f"Could not find '{min_amount_key}' for {currency_code_lower} in NOWPayments response: {data}")
+            return None
     except requests.exceptions.Timeout:
         logger.error(f"Timeout fetching minimum amount for {currency_code_lower} from NOWPayments.")
         return None
     except requests.exceptions.RequestException as e:
-        # Log specific API errors if possible (e.g., invalid currency)
         logger.error(f"Error fetching minimum amount for {currency_code_lower} from NOWPayments: {e}")
+        if e.response is not None:
+            logger.error(f"NOWPayments min-amount error response ({e.response.status_code}): {e.response.text}")
         return None
     except (KeyError, ValueError, json.JSONDecodeError) as e:
         logger.error(f"Error parsing NOWPayments min amount response for {currency_code_lower}: {e}")
@@ -1187,8 +1190,6 @@ def format_expiration_time(expiration_date_str: str | None) -> str:
     try:
         # Parse the ISO 8601 string with timezone info
         dt_obj = datetime.fromisoformat(expiration_date_str)
-        # Convert to local timezone if needed (or keep as UTC)
-        # dt_local = dt_obj.astimezone() # Example: convert to local
         # Format the time part
         return dt_obj.strftime("%H:%M:%S %Z") # Example: include timezone abbreviation
     except (ValueError, TypeError) as e:
