@@ -54,7 +54,6 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
         return {'error': 'rate_fetch_error', 'currency': pay_currency_code.upper()}
 
     # 2. Calculate Crypto Amount
-    # Use high precision division, round *up* slightly to ensure enough value
     crypto_amount_needed = (target_eur_amount / eur_price).quantize(Decimal('1E-8'), rounding=ROUND_UP)
     logger.info(f"Calculated {crypto_amount_needed} {pay_currency_code} needed for {target_eur_amount} EUR (Rate: {eur_price} EUR/{pay_currency_code})")
 
@@ -68,7 +67,6 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
     invoice_crypto_amount = max(crypto_amount_needed, min_amount_api)
     if invoice_crypto_amount > crypto_amount_needed:
         logger.warning(f"Calculated amount {crypto_amount_needed} was below NOWPayments minimum {min_amount_api}. Using minimum for invoice: {invoice_crypto_amount} {pay_currency_code}")
-
 
     # 4. Prepare API Request Data
     order_id = f"USER{user_id}_DEPOSIT_{int(time.time())}_{uuid.uuid4().hex[:6]}" # Unique order ID
@@ -93,7 +91,7 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
     # 5. Make API Call
     try:
         def make_request():
-            # (make_request inner logic remains the same as previous version)
+            # (make_request inner logic remains the same)
             try:
                 response = requests.post(payment_url, headers=headers, json=payload, timeout=20)
                 response.raise_for_status()
@@ -106,13 +104,11 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
                  status_code = e.response.status_code if e.response is not None else None
                  error_content = e.response.text if e.response is not None else "No response content"
                  if status_code == 401: return {'error': 'api_key_invalid'}
-                 # Check specific error based on previous log / API minimum check
                  if status_code == 400 and "AMOUNT_MINIMAL_ERROR" in error_content:
                      logger.warning(f"NOWPayments rejected payment for {order_id} due to amount being too low (API check).")
                      min_amount_fallback = "N/A"
                      try:
                          msg_data = json.loads(error_content)
-                         # Extract the numeric part after 'less than minimal '
                          msg_parts = msg_data.get("message", "").split("less than minimal ")
                          if len(msg_parts) > 1:
                              min_amount_fallback = msg_parts[1].strip()
@@ -130,12 +126,10 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
         if 'error' in payment_data:
              if payment_data['error'] == 'api_key_invalid': logger.critical("NOWPayments API Key seems invalid!")
              elif payment_data.get('internal'): logger.error("Internal error during API request (e.g., timeout).")
-             # Handle amount_too_low error returned from make_request
              elif payment_data['error'] == 'amount_too_low_api':
-                 # Add the originally calculated crypto amount for the user message
                  payment_data['crypto_amount'] = f"{crypto_amount_needed:f}".rstrip('0').rstrip('.')
-                 payment_data['target_eur_amount'] = target_eur_amount # Add target EUR for the message
-                 return payment_data # Pass this specific error back
+                 payment_data['target_eur_amount'] = target_eur_amount
+                 return payment_data
              else: logger.error(f"NOWPayments API returned error: {payment_data}")
              return payment_data
 
@@ -144,9 +138,8 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
              logger.error(f"Invalid response from NOWPayments API for order {order_id}: Missing keys. Response: {payment_data}")
              return {'error': 'invalid_api_response'}
 
-        # --- ADD original target amount to response data ---
         payment_data['target_eur_amount_orig'] = float(target_eur_amount)
-        payment_data['min_amount_from_api'] = float(min_amount_api) # Also add the confirmed min amount
+        payment_data['min_amount_from_api'] = float(min_amount_api)
 
         # 7. Store Pending Deposit Info
         add_success = await asyncio.to_thread(
@@ -266,8 +259,9 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
     """Displays the NOWPayments invoice details with improved formatting and overpayment note."""
     query = update.callback_query
     chat_id = query.message.chat_id
-    lang = context.user_data.get("lang", "en") # Get language
+    lang = context.user_data.get("lang", "en")
     lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
+    final_msg = "Error displaying invoice." # Fallback message
 
     try:
         # Extract required data safely
@@ -291,39 +285,53 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
 
         expiration_display = format_expiration_time(expiration_date_str)
 
-        # Get translated texts
-        invoice_title_refill = lang_data.get("invoice_title_refill", "*Top\\-Up Invoice Created*") # Markdown default
-        min_amount_label = lang_data.get("min_amount_label", "*Minimum Amount:*") # New label
+        # Get translated texts (assuming they contain necessary escapes or use placeholders)
+        invoice_title_refill = lang_data.get("invoice_title_refill", "*Top\\-Up Invoice Created*")
+        min_amount_label = lang_data.get("min_amount_label", "*Minimum Amount:*")
         payment_address_label = lang_data.get("payment_address_label", "*Payment Address:*")
-        target_value_label = lang_data.get("target_value_label", "Target Value") # Kept for reference
+        target_value_label = lang_data.get("target_value_label", "Target Value") # For reference
         expires_at_label = lang_data.get("expires_at_label", "*Expires At:*")
-        send_warning_template = lang_data.get("send_warning_template", "⚠️ *Important:* Send *only* {asset} to this address\\.") # Updated default
-        overpayment_note = lang_data.get("overpayment_note", "ℹ️ _Sending more than this amount is okay\\! Your balance will be credited based on the amount received after network confirmation\\._") # New note
-        confirmation_note = lang_data.get("confirmation_note", "✅ Confirmation is automatic via webhook after network confirmation\\.") # Updated default
+        send_warning_template = lang_data.get("send_warning_template", "⚠️ *Important:* Send *only* {asset} to this address\\.")
+        overpayment_note = lang_data.get("overpayment_note", "ℹ️ _Sending more than this amount is okay\\! Your balance will be credited based on the amount received after network confirmation\\._")
+        confirmation_note = lang_data.get("confirmation_note", "✅ Confirmation is automatic via webhook after network confirmation\\.")
         back_to_profile_button = lang_data.get("back_profile_button", "Back to Profile")
 
-        # Construct message using MarkdownV2
-        # Use MarkdownV2 escapes for special characters `*_[]()~`>#+-.={}!|`
-        msg_parts = [
-            invoice_title_refill,
-            f"\n_(Requested: {helpers.escape_markdown(target_eur_display, version=2)} EUR)_",
-            f"\n{min_amount_label} `{pay_amount_display}` {helpers.escape_markdown(pay_currency, version=2)}",
-            overpayment_note, # Assuming already escaped or needs escaping
-            f"\n{payment_address_label}",
-            f"`{helpers.escape_markdown(pay_address, version=2)}`", # Escape address just in case
-            f"\n{send_warning_template.format(asset=helpers.escape_markdown(pay_currency, version=2))}",
-            f"{expires_at_label} {helpers.escape_markdown(expiration_display, version=2)}",
-            f"\n{confirmation_note}"
-        ]
+        # Manually escape dynamic parts before inserting into the final message string
+        escaped_target_eur = helpers.escape_markdown(target_eur_display, version=2)
+        escaped_pay_amount = helpers.escape_markdown(pay_amount_display, version=2) # Escape just in case
+        escaped_currency = helpers.escape_markdown(pay_currency, version=2)
+        escaped_address = helpers.escape_markdown(pay_address, version=2)
+        escaped_expiration = helpers.escape_markdown(expiration_display, version=2)
 
-        final_msg = "\n".join(msg_parts)
+        # Construct message using f-string and escaped variables
+        # Using pre-escaped language strings for static parts
+        msg = f"""{invoice_title_refill}
+
+_{helpers.escape_markdown(f"(Requested: {target_eur_display} EUR)", version=2)}_
+
+Please send *at least* the following amount:
+{min_amount_label} `{escaped_pay_amount}` {escaped_currency}
+
+{overpayment_note}
+
+{payment_address_label}
+`{escaped_address}`
+
+{send_warning_template.format(asset=escaped_currency)}
+
+{expires_at_label} {escaped_expiration}
+
+{confirmation_note}
+"""
+        # Remove leading/trailing whitespace from the final message
+        final_msg = msg.strip()
 
         keyboard = [[InlineKeyboardButton(f"⬅️ {back_to_profile_button}", callback_data="profile")]]
 
         await query.edit_message_text(
             final_msg,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN_V2,
+            parse_mode=ParseMode.MARKDOWN_V2, # Specify MarkdownV2
             disable_web_page_preview=True
         )
     except (ValueError, KeyError, TypeError) as e:
@@ -334,7 +342,8 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
         except Exception: pass
     except telegram_error.BadRequest as e:
         if "message is not modified" not in str(e).lower():
-             logger.error(f"Error editing NOWPayments invoice message: {e}. Message: {final_msg}")
+             # Log the *unescaped* version for easier debugging if needed
+             logger.error(f"Error editing NOWPayments invoice message: {e}. Attempted message (unescaped for logging): {msg.strip()}") # Use unescaped msg for logging
         else: await query.answer()
     except Exception as e:
          logger.error(f"Unexpected error in display_nowpayments_invoice: {e}", exc_info=True)
