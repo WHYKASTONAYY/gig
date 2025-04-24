@@ -93,7 +93,7 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
     # 5. Make API Call
     try:
         def make_request():
-            # make_request inner logic remains the same as previous version
+            # (make_request inner logic remains the same as previous version)
             try:
                 response = requests.post(payment_url, headers=headers, json=payload, timeout=20)
                 response.raise_for_status()
@@ -134,6 +134,7 @@ async def create_nowpayments_payment(user_id: int, target_eur_amount: Decimal, p
              elif payment_data['error'] == 'amount_too_low_api':
                  # Add the originally calculated crypto amount for the user message
                  payment_data['crypto_amount'] = f"{crypto_amount_needed:f}".rstrip('0').rstrip('.')
+                 payment_data['target_eur_amount'] = target_eur_amount # Add target EUR for the message
                  return payment_data # Pass this specific error back
              else: logger.error(f"NOWPayments API returned error: {payment_data}")
              return payment_data
@@ -202,6 +203,7 @@ async def handle_select_refill_crypto(update: Update, context: ContextTypes.DEFA
     error_invalid_response_msg = lang_data.get("error_invalid_nowpayments_response", "❌ Payment API Error: Invalid response received. Please contact support.")
     error_api_key_msg = lang_data.get("error_nowpayments_api_key", "❌ Payment API Error: Invalid API key. Please contact support.")
     error_pending_db_msg = lang_data.get("payment_pending_db_error", "❌ Database Error: Could not record pending payment. Please contact support.")
+    # Specific message for amount too low based on API check
     error_amount_too_low_api_msg = lang_data.get("payment_amount_too_low_api", "❌ Payment Amount Too Low: The equivalent of {target_eur_amount} EUR in {currency} ({crypto_amount}) is below the minimum required by the payment provider ({min_amount} {currency}). Please try a higher EUR amount.")
     error_min_amount_fetch_msg = lang_data.get("error_min_amount_fetch", "❌ Error: Could not retrieve minimum payment amount for {currency}. Please try again later or select a different currency.")
     error_getting_rate_msg = lang_data.get("error_getting_rate", "❌ Error: Could not get exchange rate for {asset}. Please try another currency or contact support.")
@@ -231,14 +233,15 @@ async def handle_select_refill_crypto(update: Update, context: ContextTypes.DEFA
         elif error_code == 'pending_db_error': error_message_to_user = error_pending_db_msg
         # **** UPDATED ERROR HANDLING ****
         elif error_code == 'amount_too_low_api':
-             # Use Decimal formatting for crypto amounts
-             min_amount_dec = Decimal(str(payment_result.get('min_amount', 0)))
-             crypto_amount_dec = Decimal(str(payment_result.get('crypto_amount', 0)))
+             # Format values safely, providing defaults if keys are missing
+             min_amount_val = payment_result.get('min_amount', 'N/A')
+             crypto_amount_val = payment_result.get('crypto_amount', 'N/A')
+             target_eur_val = payment_result.get('target_eur_amount', refill_eur_amount_decimal) # Use original amount as fallback
              error_message_to_user = error_amount_too_low_api_msg.format(
-                 target_eur_amount=format_currency(refill_eur_amount_decimal),
+                 target_eur_amount=format_currency(target_eur_val),
                  currency=payment_result.get('currency', selected_asset_code.upper()),
-                 crypto_amount=f"{crypto_amount_dec:.8f}".rstrip('0').rstrip('.'), # Format with precision
-                 min_amount=f"{min_amount_dec:.8f}".rstrip('0').rstrip('.') # Format with precision
+                 crypto_amount=crypto_amount_val,
+                 min_amount=min_amount_val
              )
         elif error_code == 'min_amount_fetch_error':
             error_message_to_user = error_min_amount_fetch_msg.format(currency=payment_result.get('currency', selected_asset_code.upper()))
@@ -275,9 +278,6 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
         expiration_date_str = payment_data.get('expiration_estimate_date')
         # Get original target EUR amount added in create_nowpayments_payment
         target_eur_orig = payment_data.get('target_eur_amount_orig')
-        # Get the actual minimum required by API (might be > calculated amount)
-        min_amount_api = payment_data.get('min_amount_from_api')
-
 
         if not pay_address or not pay_amount_str:
             logger.error(f"Missing critical data in NOWPayments response for display: {payment_data}")
@@ -295,7 +295,7 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
         invoice_title_refill = lang_data.get("invoice_title_refill", "*Top\\-Up Invoice Created*") # Markdown default
         min_amount_label = lang_data.get("min_amount_label", "*Minimum Amount:*") # New label
         payment_address_label = lang_data.get("payment_address_label", "*Payment Address:*")
-        target_value_label = lang_data.get("target_value_label", "Target Value") # Keep for reference
+        target_value_label = lang_data.get("target_value_label", "Target Value") # Kept for reference
         expires_at_label = lang_data.get("expires_at_label", "*Expires At:*")
         send_warning_template = lang_data.get("send_warning_template", "⚠️ *Important:* Send *only* {asset} to this address\\.") # Updated default
         overpayment_note = lang_data.get("overpayment_note", "ℹ️ _Sending more than this amount is okay\\! Your balance will be credited based on the amount received after network confirmation\\._") # New note
@@ -303,11 +303,12 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
         back_to_profile_button = lang_data.get("back_profile_button", "Back to Profile")
 
         # Construct message using MarkdownV2
+        # Use MarkdownV2 escapes for special characters `*_[]()~`>#+-.={}!|`
         msg_parts = [
             invoice_title_refill,
             f"\n_(Requested: {helpers.escape_markdown(target_eur_display, version=2)} EUR)_",
             f"\n{min_amount_label} `{pay_amount_display}` {helpers.escape_markdown(pay_currency, version=2)}",
-            overpayment_note,
+            overpayment_note, # Assuming already escaped or needs escaping
             f"\n{payment_address_label}",
             f"`{helpers.escape_markdown(pay_address, version=2)}`", # Escape address just in case
             f"\n{send_warning_template.format(asset=helpers.escape_markdown(pay_currency, version=2))}",
