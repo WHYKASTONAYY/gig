@@ -17,7 +17,7 @@ from telegram import (
     InputMediaPhoto, InputMediaVideo, InputMediaAnimation
 )
 from telegram.constants import ParseMode
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, JobQueue # Import JobQueue
 from telegram import helpers
 import telegram.error as telegram_error
 
@@ -53,7 +53,219 @@ except ImportError:
 # Logging setup
 logger = logging.getLogger(__name__)
 
-# --- Admin Callback Handlers ---
+# --- Constants for Media Group Handling ---
+MEDIA_GROUP_COLLECTION_DELAY = 2.0 # Seconds to wait for more media in a group
+
+
+# --- Helper Function to Remove Existing Job ---
+def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Removes a job by name if it exists."""
+    current_jobs = context.job_queue.get_jobs_by_name(name)
+    if not current_jobs:
+        return False
+    for job in current_jobs:
+        job.schedule_removal()
+        logger.debug(f"Removed existing job: {name}")
+    return True
+
+# --- Helper to Prepare and Confirm Drop (Handles Download) ---
+async def _prepare_and_confirm_drop(
+    update: Update | None, # Can be None if called from job
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    collected_media_info: list # List of dicts [{'type': str, 'file_id': str}]
+    ):
+    """Downloads media (if any) and presents the confirmation message."""
+    chat_id = update.effective_chat.id if update else context.job.chat_id
+    user_id = update.effective_user.id if update else context.job.user_id
+
+    # Check context requirements again before proceeding
+    required_context = ["admin_city", "admin_district", "admin_product_type", "pending_drop_size", "pending_drop_price"]
+    if not all(k in context.user_data for k in required_context):
+        logger.error(f"_prepare_and_confirm_drop: Context lost for user {user_id}.")
+        await send_message_with_retry(context.bot, chat_id, "❌ Error: Context lost. Please start adding product again.", parse_mode=None)
+        # Clear potentially incomplete states
+        keys_to_clear = ["state", "pending_drop", "pending_drop_size", "pending_drop_price", "collecting_media_group_id", "collected_media"]
+        for key in keys_to_clear: context.user_data.pop(key, None)
+        return
+
+    temp_dir = None
+    media_list_for_db = []
+    download_errors = 0
+
+    if collected_media_info:
+        try:
+            temp_dir = await asyncio.to_thread(tempfile.mkdtemp)
+            logger.info(f"Created temp dir for media download: {temp_dir} (User: {user_id})")
+
+            for i, media_info in enumerate(collected_media_info):
+                media_type = media_info['type']
+                file_id = media_info['file_id']
+                file_extension = ".jpg" if media_type == "photo" else ".mp4" if media_type in ["video", "gif"] else ".dat"
+                temp_file_path = os.path.join(temp_dir, f"{file_id}{file_extension}")
+
+                try:
+                    logger.info(f"Downloading media {i+1}/{len(collected_media_info)} ({file_id}) to {temp_file_path}")
+                    file_obj = await context.bot.get_file(file_id)
+                    await file_obj.download_to_drive(custom_path=temp_file_path)
+                    if not await asyncio.to_thread(os.path.exists, temp_file_path) or await asyncio.to_thread(os.path.getsize, temp_file_path) == 0:
+                        raise IOError(f"Downloaded file {temp_file_path} is missing or empty.")
+                    media_list_for_db.append({"type": media_type, "path": temp_file_path, "file_id": file_id})
+                    logger.info(f"Media download {i+1} successful.")
+                except (telegram_error.TelegramError, IOError, OSError) as e:
+                    logger.error(f"Error downloading/verifying media {i+1} ({file_id}): {e}")
+                    download_errors += 1
+                except Exception as e:
+                    logger.error(f"Unexpected error downloading media {i+1} ({file_id}): {e}", exc_info=True)
+                    download_errors += 1
+
+            if download_errors > 0:
+                await send_message_with_retry(context.bot, chat_id, f"⚠️ Warning: {download_errors} media file(s) failed to download. Adding drop with successfully downloaded media only.", parse_mode=None)
+
+        except Exception as e:
+             logger.error(f"Error setting up/during media download loop user {user_id}: {e}", exc_info=True)
+             await send_message_with_retry(context.bot, chat_id, "⚠️ Warning: Error during media processing. Drop will be added without media.", parse_mode=None)
+             media_list_for_db = [] # Reset list if temp dir failed etc.
+             if temp_dir and os.path.exists(temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True); temp_dir = None
+
+    # --- Prepare Confirmation ---
+    context.user_data["pending_drop"] = {
+        "city": context.user_data["admin_city"], "district": context.user_data["admin_district"],
+        "product_type": context.user_data["admin_product_type"], "size": context.user_data["pending_drop_size"],
+        "price": context.user_data["pending_drop_price"], "original_text": text,
+        "media": media_list_for_db,
+        "temp_dir": temp_dir # Store temp_dir path (or None)
+    }
+    context.user_data.pop("state", None) # Clear state *before* confirmation
+
+    city_name = context.user_data['admin_city']
+    dist_name = context.user_data['admin_district']
+    type_name = context.user_data['admin_product_type']
+    size_name = context.user_data['pending_drop_size']
+    price_str = format_currency(context.user_data['pending_drop_price'])
+    text_preview = text[:200] + ("..." if len(text) > 200 else "")
+    text_display = text_preview if text_preview else "No details text provided"
+    media_count = len(context.user_data["pending_drop"]["media"])
+    total_submitted_media = len(collected_media_info)
+    media_status = f"{media_count}/{total_submitted_media} Downloaded" if total_submitted_media > 0 else "No"
+    if download_errors > 0: media_status += " (Errors)"
+
+    msg = (f"📦 Confirm New Drop\n\n🏙️ City: {city_name}\n🏘️ District: {dist_name}\n💎 Type: {type_name}\n"
+           f"📏 Size: {size_name}\n💰 Price: {price_str} EUR\n📝 Details: {text_display}\n"
+           f"📸 Media Attached: {media_status}\n\nAdd this drop?")
+    keyboard = [[InlineKeyboardButton("✅ Yes, Add Drop", callback_data="confirm_add_drop|yes"),
+                InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_add")]]
+    await send_message_with_retry(context.bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+# --- Job Function to Process Collected Media Group ---
+async def _process_collected_media(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback to process a collected media group."""
+    job_data = context.job.data
+    user_id = context.job.user_id
+    chat_id = context.job.chat_id
+    media_group_id = job_data.get("media_group_id")
+
+    logger.info(f"Job executing: Process media group {media_group_id} for user {user_id}")
+
+    # Retrieve collected data (ensure it exists)
+    collected_info = context.user_data.get('collected_media', {}).get(media_group_id)
+    if not collected_info or not collected_info.get('media'):
+        logger.warning(f"Job {media_group_id}: No collected media found in user_data for user {user_id}.")
+        context.user_data.pop('collecting_media_group_id', None)
+        context.user_data.pop('collected_media', None)
+        return
+
+    collected_media = collected_info['media']
+    caption = collected_info.get('caption', '') # Get collected caption
+
+    # Clear collection state *before* calling the confirmation helper
+    context.user_data.pop('collecting_media_group_id', None)
+    if 'collected_media' in context.user_data and media_group_id in context.user_data['collected_media']:
+        del context.user_data['collected_media'][media_group_id]
+        if not context.user_data['collected_media']: # Remove key if empty
+            context.user_data.pop('collected_media', None)
+
+    # Call the preparation/confirmation function
+    # Pass None for update as this comes from the job queue
+    await _prepare_and_confirm_drop(None, context, caption, collected_media)
+
+# --- Modified Handler for Drop Details Message ---
+async def handle_adm_drop_details_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the message containing drop text and optional media (single or group)."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if user_id != ADMIN_ID: return
+    if not update.message: return
+    if context.user_data.get("state") != "awaiting_drop_details": return
+
+    # Check context requirements earlier
+    required_context = ["admin_city", "admin_district", "admin_product_type", "pending_drop_size", "pending_drop_price"]
+    if not all(k in context.user_data for k in required_context):
+        await send_message_with_retry(context.bot, chat_id, "❌ Error: Context lost. Please start adding product again.", parse_mode=None)
+        keys_to_clear = ["state", "pending_drop", "pending_drop_size", "pending_drop_price", "collecting_media_group_id", "collected_media"]
+        for key in keys_to_clear: context.user_data.pop(key, None)
+        return
+
+    media_group_id = update.message.media_group_id
+    job_name = f"process_media_group_{user_id}_{media_group_id}" if media_group_id else None
+
+    media_type, file_id = None, None
+    if update.message.photo: media_type, file_id = "photo", update.message.photo[-1].file_id
+    elif update.message.video: media_type, file_id = "video", update.message.video.file_id
+    elif update.message.animation: media_type, file_id = "gif", update.message.animation.file_id
+
+    # Get text/caption - prioritize caption, then text
+    text = (update.message.caption or update.message.text or "").strip()
+
+    if media_group_id:
+        logger.debug(f"Received message part of media group {media_group_id} from user {user_id}")
+        if 'collected_media' not in context.user_data:
+            context.user_data['collected_media'] = {}
+
+        # Initialize collection for this group if it's the first message we see for it
+        if media_group_id not in context.user_data['collected_media']:
+            context.user_data['collected_media'][media_group_id] = {'media': [], 'caption': None}
+            logger.info(f"Started collecting media for group {media_group_id} user {user_id}")
+
+        # Add media item if present in this specific update
+        if media_type and file_id:
+            context.user_data['collected_media'][media_group_id]['media'].append(
+                {'type': media_type, 'file_id': file_id}
+            )
+
+        # Store the caption if this update has one (usually the first message has it)
+        # Overwrite previous caption for the group if a new one comes (though unlikely)
+        if text:
+             context.user_data['collected_media'][media_group_id]['caption'] = text
+
+        # Remove any previous job for this group and schedule/reschedule
+        remove_job_if_exists(job_name, context)
+        context.job_queue.run_once(
+            _process_collected_media,
+            when=timedelta(seconds=MEDIA_GROUP_COLLECTION_DELAY),
+            data={'media_group_id': media_group_id, 'chat_id': chat_id, 'user_id': user_id},
+            name=job_name,
+            job_kwargs={'misfire_grace_time': 15} # Allow some delay
+        )
+        logger.debug(f"Scheduled/Rescheduled job {job_name} for media group {media_group_id}")
+        # Don't proceed to confirmation here, wait for the job
+
+    else:
+        # --- Handle Single Message (No Media Group ID) ---
+        logger.debug(f"Received single message (or text only) for drop details from user {user_id}")
+        # Clear any potential leftover media group collection state for safety
+        context.user_data.pop('collecting_media_group_id', None)
+        context.user_data.pop('collected_media', None)
+
+        single_media_info = []
+        if media_type and file_id:
+            single_media_info.append({'type': media_type, 'file_id': file_id})
+
+        # Immediately prepare and confirm this single message
+        await _prepare_and_confirm_drop(update, context, text, single_media_info)
+
+
+# --- Admin Callback Handlers (No changes needed below this line for the media group fix) ---
 async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Displays the main admin dashboard, handling both command and callback."""
     user = update.effective_user
@@ -143,7 +355,7 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     else:
         await send_message_with_retry(context.bot, chat_id, msg, reply_markup=reply_markup, parse_mode=None)
 
-
+# --- (Keep all other admin handlers below this line as they were) ---
 # --- Sales Analytics Handlers ---
 async def handle_sales_analytics_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Displays the sales analytics submenu."""
@@ -303,7 +515,6 @@ async def handle_sales_run(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     except telegram_error.BadRequest as e:
         if "message is not modified" not in str(e).lower(): logger.error(f"Error editing sales report: {e}")
         else: await query.answer()
-
 
 # --- Add Product Flow Handlers ---
 async def handle_adm_city(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
@@ -552,30 +763,42 @@ async def cancel_add(update: Update, context: ContextTypes.DEFAULT_TYPE, params=
     keys_to_clear = [
         "state", "pending_drop", "pending_drop_size", "pending_drop_price",
         "admin_city_id", "admin_district_id", "admin_product_type",
-        "admin_city", "admin_district"
+        "admin_city", "admin_district",
+        "collecting_media_group_id", "collected_media" # <-- Clear media group keys too
     ]
     for key in keys_to_clear:
         context.user_data.pop(key, None)
 
+    # Cancel any pending job
     if query:
-        try:
+         job_name = f"process_media_group_{query.from_user.id}_*" # Wildcard might not work, need exact ID if stored
+         # If we stored the group ID being collected, we could use it here.
+         # For now, we rely on the job data check inside the job itself.
+         # remove_job_if_exists(...) # Can't easily get the name here without more state
+
+         try:
             await query.edit_message_text("❌ Add Product Cancelled", parse_mode=None)
-        except telegram_error.BadRequest as e:
+         except telegram_error.BadRequest as e:
              if "message is not modified" not in str(e).lower(): logger.error(f"Error editing cancel message: {e}")
              else: pass # Ignore if not modified
-        keyboard = [[InlineKeyboardButton("🔧 Admin Menu", callback_data="admin_menu"),
-                     InlineKeyboardButton("🏠 User Home", callback_data="back_start")]]
-        await send_message_with_retry(
-            context.bot, query.message.chat_id,
-            "Returning to Admin Menu.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=None
-        )
+         keyboard = [[InlineKeyboardButton("🔧 Admin Menu", callback_data="admin_menu"),
+                      InlineKeyboardButton("🏠 User Home", callback_data="back_start")]]
+         await send_message_with_retry(
+             context.bot, query.message.chat_id,
+             "Returning to Admin Menu.",
+             reply_markup=InlineKeyboardMarkup(keyboard),
+             parse_mode=None
+         )
     elif update.message: # If cancelled via message handler perhaps
          await send_message_with_retry(context.bot, update.message.chat_id, "Add product cancelled.", parse_mode=None)
     else:
          logger.info("Add product flow cancelled internally (no query/message object).")
 
+
+# --- Manage Geography Handlers ---
+# (Keep handle_adm_manage_cities, handle_adm_add_city, handle_adm_edit_city, handle_adm_delete_city)
+# (Keep handle_adm_manage_districts, handle_adm_manage_districts_city, handle_adm_add_district, handle_adm_edit_district, handle_adm_remove_district)
+# ... (rest of the admin.py file remains the same) ...
 
 # --- Manage Geography Handlers ---
 async def handle_adm_manage_cities(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
@@ -1773,89 +1996,8 @@ async def handle_adm_price_message(update: Update, context: ContextTypes.DEFAULT
     context.user_data["state"] = "awaiting_drop_details"
     keyboard = [[InlineKeyboardButton("❌ Cancel Add", callback_data="cancel_add")]]
     price_f = format_currency(price)
-    await send_message_with_retry(context.bot, chat_id, f"Price set to {price_f} EUR. Now send drop details text (optional: attach one photo/video/gif).",
+    await send_message_with_retry(context.bot, chat_id, f"Price set to {price_f} EUR. Now send drop details text (optional: attach photo(s)/video(s)/gif(s)).",
                             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
-
-async def handle_adm_drop_details_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the message containing drop text and optional media."""
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if user_id != ADMIN_ID: return
-    if not update.message: return
-    if context.user_data.get("state") != "awaiting_drop_details": return
-    drop_text = (update.message.caption or update.message.text or "").strip()
-    required_context = ["admin_city", "admin_district", "admin_product_type", "pending_drop_size", "pending_drop_price"]
-    if not all(k in context.user_data for k in required_context):
-        await send_message_with_retry(context.bot, chat_id, "❌ Error: Context lost.", parse_mode=None)
-        keys_to_clear = ["state", "pending_drop", "pending_drop_size", "pending_drop_price"]
-        for key in keys_to_clear: context.user_data.pop(key, None)
-        return
-
-    temp_dir = None
-    media_list = []
-    download_error = False
-    try:
-        media_file, media_type, file_id_to_download, temp_file_path = None, None, None, None
-        has_media = update.message.photo or update.message.video or update.message.animation
-        if has_media:
-            # Create a unique temporary directory for this download
-            temp_dir = await asyncio.to_thread(tempfile.mkdtemp)
-            logger.info(f"Created temp dir for media download: {temp_dir}")
-            if update.message.photo: media_file, file_id_to_download, media_type, temp_file_path = update.message.photo[-1], update.message.photo[-1].file_id, "photo", os.path.join(temp_dir, f"{update.message.photo[-1].file_id}.jpg")
-            elif update.message.video: media_file, file_id_to_download, media_type, temp_file_path = update.message.video, update.message.video.file_id, "video", os.path.join(temp_dir, f"{update.message.video.file_id}.mp4")
-            elif update.message.animation: media_file, file_id_to_download, media_type, temp_file_path = update.message.animation, update.message.animation.file_id, "gif", os.path.join(temp_dir, f"{update.message.animation.file_id}.mp4")
-            if file_id_to_download and temp_file_path and media_type:
-                try:
-                    logger.info(f"Downloading media {file_id_to_download} to {temp_file_path}")
-                    file_obj = await context.bot.get_file(file_id_to_download)
-                    await file_obj.download_to_drive(custom_path=temp_file_path)
-                    if not await asyncio.to_thread(os.path.exists, temp_file_path) or await asyncio.to_thread(os.path.getsize, temp_file_path) == 0:
-                        raise IOError(f"Downloaded file {temp_file_path} is missing or empty.")
-                    # Store the temp path for now, it will be moved later if confirmed
-                    media_list.append({"type": media_type, "path": temp_file_path, "file_id": file_id_to_download})
-                    logger.info("Media download successful.")
-                except (telegram_error.TelegramError, IOError, OSError) as e:
-                    logger.error(f"Error downloading/verifying media: {e}")
-                    await send_message_with_retry(context.bot, chat_id, "⚠️ Warning: Error downloading media. Drop will be added without media.", parse_mode=None)
-                    download_error = True
-                    if temp_dir and os.path.exists(temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True); temp_dir = None # Clean up temp dir on download error
-                except Exception as e:
-                    logger.error(f"Unexpected error downloading media: {e}", exc_info=True)
-                    await send_message_with_retry(context.bot, chat_id, "⚠️ Warning: Unexpected error downloading media. Drop will be added without media.", parse_mode=None)
-                    download_error = True
-                    if temp_dir and os.path.exists(temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True); temp_dir = None # Clean up temp dir on download error
-
-        context.user_data["pending_drop"] = {
-            "city": context.user_data["admin_city"], "district": context.user_data["admin_district"],
-            "product_type": context.user_data["admin_product_type"], "size": context.user_data["pending_drop_size"],
-            "price": context.user_data["pending_drop_price"], "original_text": drop_text,
-            "media": media_list if not download_error else [],
-            "temp_dir": temp_dir # Store temp_dir path (or None if download failed)
-        }
-        context.user_data.pop("state", None)
-        # Prepare confirmation message
-        city_name = context.user_data['admin_city']
-        dist_name = context.user_data['admin_district']
-        type_name = context.user_data['admin_product_type']
-        size_name = context.user_data['pending_drop_size']
-        price_str = format_currency(context.user_data['pending_drop_price'])
-        text_preview = drop_text[:200] + ("..." if len(drop_text) > 200 else "")
-        text_display = text_preview if text_preview else "No details text provided"
-        media_count = len(context.user_data["pending_drop"]["media"])
-        download_status = " (Download Failed)" if download_error else ""
-        msg = (f"📦 Confirm New Drop\n\n🏙️ City: {city_name}\n🏘️ District: {dist_name}\n💎 Type: {type_name}\n"
-               f"📏 Size: {size_name}\n💰 Price: {price_str} EUR\n📝 Details: {text_display}\n"
-               f"📸 Media Attached: {'Yes' if media_count > 0 else 'No'}{download_status}\n\nAdd this drop?")
-        keyboard = [[InlineKeyboardButton("✅ Yes, Add Drop", callback_data="confirm_add_drop|yes"),
-                    InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_add")]]
-        await send_message_with_retry(context.bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
-    except Exception as e:
-         logger.error(f"Unexpected error processing drop details: {e}", exc_info=True)
-         await send_message_with_retry(context.bot, chat_id, "❌ An unexpected error occurred.", parse_mode=None)
-         if temp_dir and os.path.exists(temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
-         keys_to_clear = ["state", "pending_drop", "pending_drop_size", "pending_drop_price"]
-         for key in keys_to_clear: context.user_data.pop(key, None)
-
 
 async def handle_adm_bot_media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the media message when state is 'awaiting_bot_media'."""
