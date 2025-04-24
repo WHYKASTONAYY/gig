@@ -9,7 +9,7 @@ from functools import wraps
 from datetime import timedelta
 import threading # Added for Flask thread
 import json # Added for webhook processing
-from decimal import Decimal # Added for webhook processing
+from decimal import Decimal, ROUND_DOWN, ROUND_UP # <-- MODIFIED: Import ROUND_DOWN and ROUND_UP
 
 # --- Telegram Imports ---
 from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -377,7 +377,8 @@ def nowpayments_webhook():
                 if current_eur_price and current_eur_price > 0:
                     # Calculate credited EUR amount based on what was actually paid
                     credited_eur_amount = (actually_paid_decimal * current_eur_price) * FEE_ADJUSTMENT
-                    credited_eur_amount = credited_eur_amount.quantize(Decimal("0.01"), rounding=ROUND_DOWN) # Round down to 2 decimal places
+                    # Use ROUND_DOWN from decimal module
+                    credited_eur_amount = credited_eur_amount.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
 
                     logger.info(f"Payment {payment_id}: User {user_id} paid {actually_paid_decimal} {pay_currency}. Rate: {current_eur_price} EUR. Credited EUR: {credited_eur_amount}")
 
