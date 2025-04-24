@@ -4,10 +4,10 @@ import sqlite3
 import time
 import logging
 import asyncio
-import os  # Import os for path joining
+import os # Import os for path joining
 from datetime import datetime, timezone
 from collections import defaultdict, Counter
-from decimal import Decimal  # Use Decimal for financial calculations
+from decimal import Decimal # Use Decimal for financial calculations
 
 # --- Telegram Imports ---
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,8 +22,8 @@ from utils import (
     CITIES, DISTRICTS, PRODUCT_TYPES, THEMES, LANGUAGES, BOT_MEDIA, ADMIN_ID, BASKET_TIMEOUT, MIN_DEPOSIT_EUR,
     format_currency, get_progress_bar, send_message_with_retry, format_discount_value,
     clear_expired_basket, fetch_last_purchases, get_user_status, fetch_reviews,
-    NOWPAYMENTS_API_KEY,  # Check if NOWPayments is configured
-    get_db_connection, MEDIA_DIR  # Import helper and MEDIA_DIR
+    NOWPAYMENTS_API_KEY, # Check if NOWPayments is configured
+    get_db_connection, MEDIA_DIR # Import helper and MEDIA_DIR
 )
 
 # Logging setup
@@ -90,7 +90,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         c.execute("SELECT balance, total_purchases, language, theme, basket FROM users WHERE user_id = ?", (user_id,))
         result = c.fetchone()
         if result:
-            balance = Decimal(str(result['balance']))  # Load balance as Decimal
+            balance = Decimal(str(result['balance'])) # Load balance as Decimal
             purchases = result['total_purchases']
             db_lang = result['language']; db_theme = result['theme']
             lang = db_lang if db_lang and db_lang in LANGUAGES else 'en'
@@ -99,7 +99,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["lang"] = lang
         context.user_data["theme"] = theme
         if 'basket' not in context.user_data: context.user_data['basket'] = []
-        clear_expired_basket(context, user_id)  # Uses helper internally now
+        clear_expired_basket(context, user_id) # Uses helper internally now
         basket = context.user_data.get("basket", [])
         basket_count = len(basket)
     except sqlite3.Error as e:
@@ -107,14 +107,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Database error initializing user {user_id}: {e}", exc_info=True)
         await send_message_with_retry(context.bot, chat_id, "❌ Error: Unable to load profile data.", parse_mode=None)
         if conn: conn.close()
-        return  # Added return on failure
+        return # Added return on failure
     finally:
         if conn: conn.close()
 
     # Prepare welcome message (plain text)
     lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
     status = get_user_status(purchases)
-    balance_str = format_currency(balance)  # Format Decimal balance
+    balance_str = format_currency(balance) # Format Decimal balance
     welcome_template = lang_data.get("welcome", "👋 Welcome, {username}!")
     status_label = lang_data.get("status_label", "Status")
     balance_label = lang_data.get("balance_label", "Balance")
@@ -404,7 +404,7 @@ async def handle_add_to_basket(update: Update, context: ContextTypes.DEFAULT_TYP
     pay_now_button_text = lang_data.get("pay_now_button", "Pay Now"); top_up_button_text = lang_data.get("top_up_button", "Top Up")
     view_basket_button_text = lang_data.get("view_basket_button", "View Basket"); clear_basket_button_text = lang_data.get("clear_basket_button", "Clear Basket")
     shop_more_button_text = lang_data.get("shop_more_button", "Shop More"); expires_label = lang_data.get("expires_label", "Expires")
-    error_adding_db = lang_data.get("error_ dolaadding_db", "Error: Database issue adding item."); error_adding_unexpected = lang_data.get("error_adding_unexpected", "Error: An unexpected issue occurred.")
+    error_adding_db = lang_data.get("error_adding_db", "Error: Database issue adding item."); error_adding_unexpected = lang_data.get("error_adding_unexpected", "Error: An unexpected issue occurred.")
     added_msg_template = lang_data.get("added_to_basket", "✅ Item Reserved!\n\n{item} is in your basket for {timeout} minutes! ⏳")
     pay_msg_template = lang_data.get("pay", "💳 Total to Pay: {amount} EUR")
 
@@ -1039,8 +1039,8 @@ async def handle_price_list_city(update: Update, context: ContextTypes.DEFAULT_T
         except telegram_error.BadRequest as e:
              if "message is not modified" not in str(e).lower():
                  logger.error(f"Error editing price list: {e}. Snippet: {msg[:200]}")
-                 error_displaying_prices = lang_data.get("error_displaying_prices", "Error displaying prices.")  # Corrected: Explicit variable
-                 await query.answer(error_displaying_prices, show_alert=True)  # Corrected: Explicit variable
+                 error_displaying_prices = lang_data.get("error_displaying_prices", "Error displaying prices.")
+                 await query.answer(error_displaying_prices, show_alert=True)
              else:
                  await query.answer()
 
@@ -1072,8 +1072,9 @@ async def handle_reviews_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton(f"✍️ {leave_review_button}", callback_data="leave_review")],
         [InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)  # Define reply_markup explicitly
-    await query.edit_message_text(review_prompt, reply_markup=reply_markup, parse_mode=None)  # Pass it here
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Corrected: Await the edit_message_text call
+    await query.edit_message_text(review_prompt, reply_markup=reply_markup, parse_mode=None)
 
 
 async def handle_leave_review(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
@@ -1092,23 +1093,65 @@ async def handle_leave_review(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_leave_review_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the text message containing the user's review."""
-    user_id = update.effective_user.id; chat_id = update.effective_chat.id; state = context.user_data.get("state"); lang = context.user_data.get("lang", "en"); lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    state = context.user_data.get("state")
+    lang = context.user_data.get("lang", "en")
+    lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
+
     if state != "awaiting_review": return
-    send_text_review_please = lang_data.get("send_text_review_please", "Please send text only."); review_not_empty = lang_data.get("review_not_empty", "Review cannot be empty."); review_too_long = lang_data.get("review_too_long", "Review too long (max 1000 chars)."); review_thanks = lang_data.get("review_thanks", "Thank you for your review!"); error_saving_review_db = lang_data.get("error_saving_review_db", "Error saving review (DB)."); error_saving_review_unexpected = lang_data.get("error_saving_review_unexpected", "Error saving review (unexpected)."); view_reviews_button = lang_data.get("view_reviews_button", "View Reviews"); home_button = lang_data.get("home_button", "Home")
-    if not update.message or not update.message.text: await send_message_with_retry(context.bot, chat_id, send_text_review_please, parse_mode=None); return
+
+    send_text_review_please = lang_data.get("send_text_review_please", "Please send text only.")
+    review_not_empty = lang_data.get("review_not_empty", "Review cannot be empty.")
+    review_too_long = lang_data.get("review_too_long", "Review too long (max 1000 chars).")
+    review_thanks = lang_data.get("review_thanks", "Thank you for your review!")
+    error_saving_review_db = lang_data.get("error_saving_review_db", "Error saving review (DB).")
+    error_saving_review_unexpected = lang_data.get("error_saving_review_unexpected", "Error saving review (unexpected).")
+    view_reviews_button = lang_data.get("view_reviews_button", "View Reviews")
+    home_button = lang_data.get("home_button", "Home")
+
+    if not update.message or not update.message.text:
+        await send_message_with_retry(context.bot, chat_id, send_text_review_please, parse_mode=None)
+        return
+
     review_text = update.message.text.strip()
-    if not review_text: await send_message_with_retry(context.bot, chat_id, review_not_empty, parse_mode=None); return
-    if len(review_text) > 1000: await send_message_with_retry(context.bot, chat_id, review_too_long, parse_mode=None); return
+    if not review_text:
+        await send_message_with_retry(context.bot, chat_id, review_not_empty, parse_mode=None)
+        return
+
+    if len(review_text) > 1000:
+         await send_message_with_retry(context.bot, chat_id, review_too_long, parse_mode=None)
+         return
+
     conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT INTO reviews (user_id, review_text, review_date) VALUES (?, ?, ?)", (user_id, review_text, datetime.now(timezone.utc).isoformat()))
-        conn.commit(); logger.info(f"User {user_id} left review."); context.user_data.pop("state", None)
-        success_msg = f"✅ {review_thanks}"; keyboard = [[InlineKeyboardButton(f"👀 {view_reviews_button}", callback_data="view_reviews|0"), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]]
+        c.execute(
+            "INSERT INTO reviews (user_id, review_text, review_date) VALUES (?, ?, ?)",
+            (user_id, review_text, datetime.now(timezone.utc).isoformat())
+        )
+        conn.commit()
+        logger.info(f"User {user_id} left a review.")
+        context.user_data.pop("state", None)
+
+        success_msg = f"✅ {review_thanks}"
+        keyboard = [[InlineKeyboardButton(f"👀 {view_reviews_button}", callback_data="view_reviews|0"),
+                     InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]]
         await send_message_with_retry(context.bot, chat_id, success_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
-    except sqlite3.Error as e: logger.error(f"DB error saving review user {user_id}: {e}", exc_info=True); if conn and conn.in_transaction: conn.rollback(); await send_message_with_retry(context.bot, chat_id, f"❌ {error_saving_review_db}", parse_mode=None); context.user_data.pop("state", None)
-    except Exception as e: logger.error(f"Unexpected error saving review user {user_id}: {e}", exc_info=True); if conn and conn.in_transaction: conn.rollback(); await send_message_with_retry(context.bot, chat_id, f"❌ {error_saving_review_unexpected}", parse_mode=None); context.user_data.pop("state", None)
+
+    except sqlite3.Error as e:
+        logger.error(f"DB error saving review user {user_id}: {e}", exc_info=True)
+        if conn and conn.in_transaction:
+            conn.rollback()
+        await send_message_with_retry(context.bot, chat_id, f"❌ {error_saving_review_db}", parse_mode=None)
+        context.user_data.pop("state", None) # Pop state even on error
+    except Exception as e:
+        logger.error(f"Unexpected error saving review user {user_id}: {e}", exc_info=True)
+        if conn and conn.in_transaction:
+            conn.rollback()
+        await send_message_with_retry(context.bot, chat_id, f"❌ {error_saving_review_unexpected}", parse_mode=None)
+        context.user_data.pop("state", None) # Pop state even on error
     finally:
         if conn: conn.close()
 
@@ -1204,7 +1247,7 @@ async def handle_refill_amount_message(update: Update, context: ContextTypes.DEF
     choose_crypto_prompt_template = lang_data.get("choose_crypto_prompt", "Top up {amount} EUR. Choose crypto:")
     cancel_top_up_button = lang_data.get("cancel_top_up_button", "Cancel Top Up")
 
-    if not update.message or not update.message.text: 
+    if not update.message or not update.message.text:
         await send_message_with_retry(context.bot, chat_id, f"❌ {send_amount_as_text}", parse_mode=None)
         return
 
@@ -1236,10 +1279,10 @@ async def handle_refill_amount_message(update: Update, context: ContextTypes.DEF
         row = []
         for display, code in supported_currencies.items():
             row.append(InlineKeyboardButton(display, callback_data=f"select_refill_crypto|{code}"))
-            if len(row) >= 3: 
+            if len(row) >= 3:
                 asset_buttons.append(row)
                 row = []
-        if row: 
+        if row:
             asset_buttons.append(row)
         asset_buttons.append([InlineKeyboardButton(f"❌ {cancel_top_up_button}", callback_data="profile")])
 
