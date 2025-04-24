@@ -1,3 +1,5 @@
+# --- START OF FILE payment.py ---
+
 import logging
 import sqlite3
 import time
@@ -23,7 +25,7 @@ from utils import (
     send_message_with_retry, format_currency, ADMIN_ID,
     LANGUAGES, load_all_data, BASKET_TIMEOUT, MIN_DEPOSIT_EUR,
     NOWPAYMENTS_API_KEY, NOWPAYMENTS_API_URL, WEBHOOK_URL,
-    get_currency_to_eur_price, format_expiration_time, FEE_ADJUSTMENT,
+    get_currency_to_eur_price, format_expiration_time, FEE_ADJUSTMENT, # format_expiration_time is no longer used here, but keep import for now
     add_pending_deposit, remove_pending_deposit, # Import DB helpers for pending deposits
     get_nowpayments_min_amount, # **** Import NEW function ****
     get_db_connection, MEDIA_DIR # Import helper and MEDIA_DIR
@@ -251,7 +253,7 @@ async def handle_select_refill_crypto(update: Update, context: ContextTypes.DEFA
         logger.info(f"NOWPayments invoice created successfully for user {user_id}. Payment ID: {payment_result.get('payment_id')}")
         context.user_data.pop('refill_eur_amount', None) # Clear intermediate value
         context.user_data.pop('state', None) # Reset state
-        await display_nowpayments_invoice(update, context, payment_result)
+        await display_nowpayments_invoice(update, context, payment_data)
 
 
 # --- Display NOWPayments Invoice ---
@@ -269,7 +271,7 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
         pay_amount_str = payment_data.get('pay_amount') # Min crypto amount (string from API)
         pay_currency = payment_data.get('pay_currency', 'N/A').upper() # Display uppercase
         payment_id = payment_data.get('payment_id', 'N/A')
-        expiration_date_str = payment_data.get('expiration_estimate_date')
+        # expiration_date_str = payment_data.get('expiration_estimate_date') # REMOVED
         # Get original target EUR amount added in create_nowpayments_payment
         target_eur_orig = payment_data.get('target_eur_amount_orig')
 
@@ -283,17 +285,17 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
 
         target_eur_display = format_currency(Decimal(str(target_eur_orig))) if target_eur_orig else "N/A"
 
-        expiration_display = format_expiration_time(expiration_date_str)
+        # expiration_display = format_expiration_time(expiration_date_str) # REMOVED
 
         # Get translated texts (assuming they contain necessary escapes or use placeholders)
         invoice_title_refill = lang_data.get("invoice_title_refill", "*Top\\-Up Invoice Created*")
         min_amount_label = lang_data.get("min_amount_label", "*Minimum Amount:*")
         payment_address_label = lang_data.get("payment_address_label", "*Payment Address:*")
-        target_value_label = lang_data.get("target_value_label", "Target Value") # For reference
-        expires_at_label = lang_data.get("expires_at_label", "*Expires At:*")
+        # target_value_label = lang_data.get("target_value_label", "Target Value") # Not used currently
+        # expires_at_label = lang_data.get("expires_at_label", "*Expires At:*") # REMOVED
         send_warning_template = lang_data.get("send_warning_template", "⚠️ *Important:* Send *only* {asset} to this address\\.")
         overpayment_note = lang_data.get("overpayment_note", "ℹ️ _Sending more than this amount is okay\\! Your balance will be credited based on the amount received after network confirmation\\._")
-        confirmation_note = lang_data.get("confirmation_note", "✅ Confirmation is automatic via webhook after network confirmation\\.")
+        # confirmation_note = lang_data.get("confirmation_note", "✅ Confirmation is automatic via webhook after network confirmation\\.") # REMOVED
         back_to_profile_button = lang_data.get("back_profile_button", "Back to Profile")
 
         # Manually escape dynamic parts before inserting into the final message string
@@ -301,10 +303,11 @@ async def display_nowpayments_invoice(update: Update, context: ContextTypes.DEFA
         escaped_pay_amount = helpers.escape_markdown(pay_amount_display, version=2) # Escape just in case
         escaped_currency = helpers.escape_markdown(pay_currency, version=2)
         escaped_address = helpers.escape_markdown(pay_address, version=2)
-        escaped_expiration = helpers.escape_markdown(expiration_display, version=2)
+        # escaped_expiration = helpers.escape_markdown(expiration_display, version=2) # REMOVED
 
         # Construct message using f-string and escaped variables
         # Using pre-escaped language strings for static parts
+        # REMOVED lines for expires_at_label and confirmation_note
         msg = f"""{invoice_title_refill}
 
 _{helpers.escape_markdown(f"(Requested: {target_eur_display} EUR)", version=2)}_
@@ -319,10 +322,8 @@ Please send *at least* the following amount:
 
 {send_warning_template.format(asset=escaped_currency)}
 
-{expires_at_label} {escaped_expiration}
+""" # Removed expires_at and confirmation_note lines
 
-{confirmation_note}
-"""
         # Remove leading/trailing whitespace from the final message
         final_msg = msg.strip()
 
@@ -728,3 +729,5 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
         ]
         try: await query.edit_message_text(full_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
         except telegram_error.BadRequest: await send_message_with_retry(context.bot, chat_id, full_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+# --- END OF FILE payment.py ---
