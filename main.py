@@ -1,4 +1,3 @@
-
 # --- START OF FILE main.py ---
 
 import logging
@@ -36,10 +35,10 @@ import nest_asyncio # Added for running flask in thread
 # Importing the whole module allows access like utils.VARIABLE
 import utils
 from utils import (
-    # TOKEN, ADMIN_ID, # No longer need direct import for main checks
+    # Constants are accessed via utils.* now where needed
     init_db, load_all_data, LANGUAGES, THEMES,
     SUPPORT_USERNAME, BASKET_TIMEOUT, clear_all_expired_baskets,
-    SECONDARY_ADMIN_IDS, # WEBHOOK_URL, NOWPAYMENTS_API_KEY # No longer need direct import
+    SECONDARY_ADMIN_IDS,
     get_db_connection, DATABASE_PATH,
     get_pending_deposit, remove_pending_deposit, # Added DB helpers
     FEE_ADJUSTMENT, get_currency_to_eur_price # Added Fee and Price utils
@@ -439,15 +438,16 @@ def main() -> None:
     logger.info("Starting bot application...")
 
     # --- Essential Configuration Checks (using utils) ---
+    # Use utils module to access these constants
     if not utils.TOKEN:
         logger.critical("CRITICAL: Telegram Bot TOKEN is not set in environment variables.")
         raise SystemExit("Missing TOKEN")
     if not utils.WEBHOOK_URL:
         logger.critical("CRITICAL: WEBHOOK_URL is not set. Cannot run in webhook mode.")
         raise SystemExit("Missing WEBHOOK_URL for webhook mode.")
-    if not utils.NOWPAYMENTS_API_KEY:
+    if not utils.NOWPAYMENTS_API_KEY: # CORRECTED
         logger.warning("NOWPAYMENTS_API_KEY is not set. Deposit functionality will fail.")
-    if utils.ADMIN_ID is None:
+    if utils.ADMIN_ID is None: # CORRECTED
          logger.warning("ADMIN_ID is not set. Admin functionality will be limited.")
     # --- End Checks ---
 
@@ -532,7 +532,7 @@ def main() -> None:
 
     port = int(os.environ.get("PORT", 8080))
     flask_thread = threading.Thread(
-        target=lambda: flask_app.run(host='0.0.0.0', port=port),
+        target=lambda: flask_app.run(host='0.0.0.0', port=port, debug=False), # Turn off Flask debug mode
         daemon=True
     )
     flask_thread.start()
@@ -546,9 +546,7 @@ def main() -> None:
         logger.info(f"Shutdown signal ({type(e).__name__}) received. Stopping application...")
         if loop.is_running():
             asyncio.run_coroutine_threadsafe(application.stop(), loop)
-            # Give loop time to process stop()
-            # loop.run_until_complete(asyncio.sleep(1)) # Optional wait
-            # loop.close() # Closing loop might cause issues if Flask thread still uses it
+            # loop.run_until_complete(loop.shutdown_asyncgens()) # Optional advanced cleanup
         logger.info("Application stop signal sent.")
 
 if __name__ == '__main__':
