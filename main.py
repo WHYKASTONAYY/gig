@@ -445,9 +445,9 @@ def main() -> None:
     if not utils.WEBHOOK_URL:
         logger.critical("CRITICAL: WEBHOOK_URL is not set. Cannot run in webhook mode.")
         raise SystemExit("Missing WEBHOOK_URL for webhook mode.")
-    if not utils.NOWPAYMENTS_API_KEY: # CORRECTED
+    if not utils.NOWPAYMENTS_API_KEY: # Check utils.NOWPAYMENTS_API_KEY
         logger.warning("NOWPAYMENTS_API_KEY is not set. Deposit functionality will fail.")
-    if utils.ADMIN_ID is None: # CORRECTED
+    if utils.ADMIN_ID is None: # Check utils.ADMIN_ID
          logger.warning("ADMIN_ID is not set. Admin functionality will be limited.")
     # --- End Checks ---
 
@@ -492,6 +492,8 @@ def main() -> None:
                     return False
                 else:
                     logger.info("Webhook set successfully.")
+                    # Optional: Verify webhook was set correctly
+                    time.sleep(1) # Give Telegram a moment
                     webhook_info = await application.bot.get_webhook_info()
                     if webhook_info.url == full_webhook_url:
                          logger.info("Webhook verified successfully.")
@@ -545,9 +547,12 @@ def main() -> None:
     except (KeyboardInterrupt, SystemExit) as e:
         logger.info(f"Shutdown signal ({type(e).__name__}) received. Stopping application...")
         if loop.is_running():
+            # Schedule stop() to run in the loop
             asyncio.run_coroutine_threadsafe(application.stop(), loop)
-            # loop.run_until_complete(loop.shutdown_asyncgens()) # Optional advanced cleanup
-        logger.info("Application stop signal sent.")
+            # Allow some time for graceful shutdown tasks
+            time.sleep(2)
+        logger.info("Application stop signal sent. Exiting main thread.")
+        # Flask thread is daemon, will exit when main thread exits
 
 if __name__ == '__main__':
     try:
