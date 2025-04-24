@@ -1,0 +1,6 @@
+
+python-telegram-bot[ext]>=22.0
+requests>=2.25.0
+Flask>=2.0.0
+nest-asyncio>=1.5.0
+pytz 
