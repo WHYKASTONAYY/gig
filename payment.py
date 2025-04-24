@@ -3,13 +3,15 @@
 import logging
 import sqlite3
 import time
-import os
-import shutil
+import os # Added import
+import shutil # Added import
 import asyncio
 import uuid # For generating unique order IDs
 import requests # For making API calls to NOWPayments
 from decimal import Decimal, ROUND_UP, ROUND_DOWN # Use Decimal for precision
 import json # For parsing potential error messages
+from datetime import datetime, timezone # Added import
+from collections import Counter, defaultdict # Added import
 
 # --- Telegram Imports ---
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -29,10 +31,10 @@ from utils import (
     format_expiration_time, FEE_ADJUSTMENT,
     add_pending_deposit, remove_pending_deposit,
     get_nowpayments_min_amount,
-    get_db_connection, MEDIA_DIR
+    get_db_connection, MEDIA_DIR,
+    clear_expired_basket # <<<--- FIXED: Added import
 )
-import user
-from collections import Counter, defaultdict
+import user # Added import
 
 logger = logging.getLogger(__name__)
 
@@ -525,7 +527,7 @@ async def process_purchase_with_balance(user_id: int, amount_to_deduct: Decimal,
             details = product_db_details.get(product_id)
             if not details: sold_out_during_process.append(f"Item ID {product_id} (unavailable)"); continue
             res_update = c.execute("UPDATE products SET reserved = MAX(0, reserved - 1) WHERE id = ?", (product_id,))
-            if res_update.rowcount == 0: logger.warning(f"Failed reserve decr. P{product_id} user {user_id}."); sold_out_during_process.append(f"{details.get('name', '?')} {details.get('size', '?')}"); continue
+            if res_update.rowcount == 0: logger.warning(f"Failed reserve decr. P{product_id} user {user_id}."); sold_out_during_process.append(f"{details.get('name', '?')} {details.get('size', '?')}"); continue # Rollback reservation
             avail_update = c.execute("UPDATE products SET available = available - 1 WHERE id = ? AND available > 0", (product_id,))
             if avail_update.rowcount == 0: logger.error(f"Failed available decr. P{product_id} user {user_id}. Race?"); sold_out_during_process.append(f"{details.get('name', '?')} {details.get('size', '?')}"); c.execute("UPDATE products SET reserved = reserved + 1 WHERE id = ?", (product_id,)); continue # Rollback reservation
             # Ensure Decimal prices from DB are converted to float for insert if needed
@@ -646,7 +648,6 @@ async def process_purchase_with_balance(user_id: int, amount_to_deduct: Decimal,
 
 
 # --- Confirm Pay Handler (Checks Balance, initiates balance payment or refill prompt) ---
-# (handle_confirm_pay function remains unchanged)
 async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Handles the 'Pay Now' button press from the basket."""
     query = update.callback_query
@@ -655,7 +656,7 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
     lang = context.user_data.get("lang", "en")
     lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
 
-    clear_expired_basket(context, user_id) # Sync call
+    clear_expired_basket(context, user_id) # Sync call <<<--- THIS CALL IS NOW VALID
     basket = context.user_data.get("basket", [])
     applied_discount_info = context.user_data.get('applied_discount')
 
@@ -701,7 +702,7 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
              logger.warning(f"All items unavailable user {user_id} payment confirm.")
              keyboard_back = [[InlineKeyboardButton("⬅️ Back", callback_data="view_basket")]]
              try: await query.edit_message_text("❌ Error: All items unavailable.", reply_markup=InlineKeyboardMarkup(keyboard_back), parse_mode=None)
-             except telegram.error.BadRequest: await send_message_with_retry(context.bot, chat_id, "❌ Error: All items unavailable.", reply_markup=InlineKeyboardMarkup(keyboard_back), parse_mode=None)
+             except telegram_error.BadRequest: await send_message_with_retry(context.bot, chat_id, "❌ Error: All items unavailable.", reply_markup=InlineKeyboardMarkup(keyboard_back), parse_mode=None)
              return
 
         final_total = original_total
@@ -735,7 +736,7 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
          logger.error(f"Unexpected error prep payment confirm user {user_id}: {e}", exc_info=True)
          kb = [[InlineKeyboardButton("⬅️ Back", callback_data="view_basket")]]
          try: await query.edit_message_text("❌ Unexpected error.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=None)
-         except telegram.error.BadRequest: await send_message_with_retry(context.bot, chat_id,"❌ Unexpected error.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=None)
+         except telegram_error.BadRequest: await send_message_with_retry(context.bot, chat_id,"❌ Unexpected error.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=None)
          return
     finally:
          if conn: conn.close()
@@ -749,14 +750,14 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
         try:
             if query.message: await query.edit_message_text("⏳ Processing payment with balance...", reply_markup=None, parse_mode=None)
             else: await send_message_with_retry(context.bot, chat_id, "⏳ Processing payment with balance...", parse_mode=None)
-        except telegram.error.BadRequest: await query.answer("Processing...")
+        except telegram_error.BadRequest: await query.answer("Processing...")
 
         success = await process_purchase_with_balance(user_id, final_total, valid_basket_items_snapshot, discount_code_to_use, context)
 
         if success:
             try:
                  if query.message: await query.edit_message_text("✅ Purchase successful! Details sent.", reply_markup=None, parse_mode=None)
-            except telegram.error.BadRequest: pass # Ignore edit error after success
+            except telegram_error.BadRequest: pass # Ignore edit error after success
         else:
             # Use await here as handle_view_basket is async
             await user.handle_view_basket(update, context) # Refresh basket view on failure
@@ -775,6 +776,6 @@ async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE,
             [InlineKeyboardButton(f"⬅️ {back_basket_button_text}", callback_data="view_basket")]
         ]
         try: await query.edit_message_text(full_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
-        except telegram.error.BadRequest: await send_message_with_retry(context.bot, chat_id, full_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        except telegram_error.BadRequest: await send_message_with_retry(context.bot, chat_id, full_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
 # --- END OF FILE payment.py ---
