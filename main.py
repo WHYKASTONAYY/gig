@@ -19,7 +19,7 @@ from telegram.ext import (
     PicklePersistence, JobQueue
 )
 from telegram.constants import ParseMode
-import telegram.error as telegram_error
+import telegram.error # Import the base error module directly
 
 # --- Flask Imports ---
 from flask import Flask, request, Response # Added for webhook server
@@ -201,7 +201,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'awaiting_new_type_name': handle_adm_add_type_message,
         'awaiting_custom_size': handle_adm_custom_size_message,
         'awaiting_price': handle_adm_price_message,
-        'awaiting_drop_details': handle_adm_drop_details_message,
+        'awaiting_drop_details': handle_adm_drop_details_message, # This now handles single/group media
         'awaiting_bot_media': handle_adm_bot_media_message,
         'awaiting_broadcast_message': handle_adm_broadcast_message,
         'awaiting_discount_code': handle_adm_discount_code_message,
@@ -212,6 +212,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     handler_func = STATE_HANDLERS.get(state)
     if handler_func:
+        # If the handler is for drop details, it might need the job queue
+        # Ensure the queue is passed if necessary (though it's available via context.job_queue)
         await handler_func(update, context)
     else:
         logger.debug(f"Ignoring message from user {user_id} in state: {state}")
@@ -220,33 +222,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs errors caused by Updates."""
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
+    # Add logging for the error type itself
+    logger.error(f"Caught error type: {type(context.error)}")
     chat_id = None
-    if isinstance(update, Update) and update.effective_chat:
-        chat_id = update.effective_chat.id
+    user_id = None # Added to potentially identify user in logs
+
+    if isinstance(update, Update):
+        if update.effective_chat:
+            chat_id = update.effective_chat.id
+        if update.effective_user:
+            user_id = update.effective_user.id
+
+    # Log context details for better debugging
+    logger.debug(f"Error context: user_data={context.user_data}, chat_data={context.chat_data}")
 
     # Don't send error messages for webhook-related processing errors
     # as they might not originate from a user chat interaction.
     if chat_id:
         error_message = "An internal error occurred. Please try again later or contact support."
-        if isinstance(context.error, telegram_error.BadRequest):
+        # Use direct reference telegram.error.SpecificError
+        if isinstance(context.error, telegram.error.BadRequest):
             if "message is not modified" in str(context.error).lower():
-                logger.debug(f"Ignoring 'message is not modified' error.")
+                logger.debug(f"Ignoring 'message is not modified' error for chat {chat_id}.")
                 return # Don't notify user for this specific error
-            logger.warning(f"Telegram API BadRequest: {context.error}")
-            error_message = "An error occurred communicating with Telegram. Please try again."
-        elif isinstance(context.error, telegram_error.NetworkError):
-            logger.warning(f"Telegram API NetworkError: {context.error}")
+            logger.warning(f"Telegram API BadRequest for chat {chat_id} (User: {user_id}): {context.error}")
+            if "can't parse entities" in str(context.error).lower():
+                error_message = "An error occurred displaying the message due to formatting. Please try again."
+            else:
+                 error_message = "An error occurred communicating with Telegram. Please try again."
+        elif isinstance(context.error, telegram.error.NetworkError):
+            logger.warning(f"Telegram API NetworkError for chat {chat_id} (User: {user_id}): {context.error}")
             error_message = "A network error occurred. Please check your connection and try again."
-        elif isinstance(context.error, telegram_error.Unauthorized):
-             logger.warning(f"Unauthorized error for chat {chat_id}: Bot possibly blocked.")
+        elif isinstance(context.error, telegram.error.Unauthorized): # <-- Use direct path
+             logger.warning(f"Unauthorized error for chat {chat_id} (User: {user_id}): Bot possibly blocked.")
              # Don't try to send a message if blocked
              return
         elif isinstance(context.error, sqlite3.Error):
-            logger.error(f"Database error during update handling: {context.error}", exc_info=True)
+            logger.error(f"Database error during update handling for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
             # Don't expose detailed DB errors to the user
+        # Handle potential job queue errors (like the NameError we saw before)
+        elif isinstance(context.error, NameError):
+             logger.error(f"NameError encountered for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
+             error_message = "An internal processing error occurred. Please try again or contact support if it persists."
+        elif isinstance(context.error, AttributeError): # Catch the specific AttributeError
+             logger.error(f"AttributeError encountered for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
+             # Check if it's the one we identified
+             if "'NoneType' object has no attribute 'get'" in str(context.error) and "_process_collected_media" in str(context.error.__traceback__):
+                 logger.error("Error likely due to missing user_data in job context.")
+                 error_message = "An internal processing error occurred (media group). Please try again."
+             else:
+                 error_message = "An unexpected internal error occurred. Please contact support."
         else:
-             logger.exception("An unexpected error occurred during update handling.")
+             logger.exception(f"An unexpected error occurred during update handling for chat {chat_id} (User: {user_id}).")
              error_message = "An unexpected error occurred. Please contact support."
+
+        # Attempt to send error message to the user
         try:
             # Use the application instance stored globally if context.bot is not available
             bot_instance = context.bot if hasattr(context, 'bot') else (telegram_app.bot if telegram_app else None)
@@ -396,15 +426,31 @@ def nowpayments_webhook():
         # Remove pending deposit record from DB
         asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
         # Optionally notify user (consider rate limits and user context)
-        pending_info = asyncio.run_coroutine_threadsafe(asyncio.to_thread(get_pending_deposit, payment_id), main_loop).result()
-        if pending_info and telegram_app:
-            user_id = pending_info['user_id']
-            cancelled_msg = lang_data.get("payment_cancelled_or_expired", "Payment Status: Your payment ({payment_id}) was cancelled or expired.").format(payment_id=payment_id)
-            # Schedule sending the message
-            asyncio.run_coroutine_threadsafe(
-                 send_message_with_retry(telegram_app.bot, user_id, cancelled_msg, parse_mode=None),
-                 main_loop
-            )
+        # Use run_coroutine_threadsafe to safely interact with the DB from the Flask thread
+        pending_info_future = asyncio.run_coroutine_threadsafe(
+            asyncio.to_thread(get_pending_deposit, payment_id),
+            main_loop
+        )
+        try:
+            # Get the result, blocking if necessary (should be quick)
+            pending_info = pending_info_future.result(timeout=5)
+            if pending_info and telegram_app:
+                user_id = pending_info['user_id']
+                # Fetch user's language from context or DB (use default 'en')
+                # Note: Accessing user_data directly from here is not thread-safe.
+                # A safer way would be to fetch lang from DB if needed, or use default.
+                lang = 'en' # Default for webhook context
+                lang_data_local = LANGUAGES.get(lang, LANGUAGES['en'])
+                cancelled_msg = lang_data_local.get("payment_cancelled_or_expired", "Payment Status: Your payment ({payment_id}) was cancelled or expired.").format(payment_id=payment_id)
+                # Schedule sending the message
+                asyncio.run_coroutine_threadsafe(
+                     send_message_with_retry(telegram_app.bot, user_id, cancelled_msg, parse_mode=None),
+                     main_loop
+                )
+        except asyncio.TimeoutError:
+             logger.error(f"Timeout getting pending info for {payment_id} during cancellation.")
+        except Exception as e:
+             logger.error(f"Error processing failed/expired status for {payment_id}: {e}")
 
     else:
          logger.info(f"Webhook received for payment {payment_id} with status: {status} (ignored).")
@@ -441,7 +487,10 @@ def main() -> None:
 
     # --- Initialize Telegram Application ---
     defaults = Defaults(parse_mode=None, block=False) # Default to plain text
-    app_builder = ApplicationBuilder().token(TOKEN).defaults(defaults)
+    # **************************************************************
+    # *** Ensure JobQueue is enabled for media group handling ***
+    # **************************************************************
+    app_builder = ApplicationBuilder().token(TOKEN).defaults(defaults).job_queue(JobQueue())
 
     # Add handlers
     app_builder.post_init(post_init)
@@ -451,6 +500,8 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", handle_admin_menu))
     application.add_handler(CallbackQueryHandler(handle_callback_query))
+    # The single MessageHandler now correctly routes based on state,
+    # including the modified handle_adm_drop_details_message
     application.add_handler(MessageHandler(
         (filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL,
         handle_message
@@ -474,6 +525,7 @@ def main() -> None:
             )
             logger.info("Background job setup complete.")
         else:
+            # This case should not happen now since we initialize JobQueue above
             logger.warning("Job Queue is not available. Basket clearing job skipped.")
     else:
         logger.warning("BASKET_TIMEOUT is not positive. Skipping background job setup.")
