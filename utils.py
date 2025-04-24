@@ -1,3 +1,5 @@
+# --- START OF FILE utils.py ---
+
 import sqlite3
 import time
 import os
@@ -659,7 +661,7 @@ SIZES = ["2g", "5g"]
 BOT_MEDIA = {'type': None, 'path': None}
 currency_price_cache = {} # Simple in-memory cache for CoinGecko prices
 min_amount_cache = {} # Simple in-memory cache for NOWPayments minimum amounts
-CACHE_EXPIRY_SECONDS = 300 # Cache prices/minimums for 5 minutes
+CACHE_EXPIRY_SECONDS = 900 # Cache prices/minimums for 15 minutes (Increased from 300)
 
 
 # --- Database Connection Helper ---
@@ -1208,3 +1210,5 @@ async def handle_coming_soon(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # --- Initial Data Load ---
 init_db() # Ensure DB schema exists before loading
 load_all_data() # Load cities, districts, types
+
+# --- END OF FILE utils.py ---
