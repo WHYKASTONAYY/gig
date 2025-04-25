@@ -53,17 +53,27 @@ EMOJI_DISCOUNT = "🏷️"
 def _get_lang_data(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, dict]:
     """Gets the current language code and corresponding language data dictionary."""
     lang = context.user_data.get("lang", "en")
+    # <<< ADDED LOGGING >>>
+    logger.debug(f"_get_lang_data: Retrieved lang '{lang}' from context.user_data.")
     lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
+    if lang not in LANGUAGES:
+        logger.warning(f"_get_lang_data: Language '{lang}' not found in LANGUAGES dict. Falling back to 'en'.")
+        lang = 'en' # Ensure lang variable reflects the fallback
+    # <<< ADDED LOGGING >>>
+    # Log first few keys for debugging, limit length if too many keys
+    keys_sample = list(lang_data.keys())[:5]
+    logger.debug(f"_get_lang_data: Returning lang '{lang}' and lang_data keys sample: {keys_sample}...")
     return lang, lang_data
 
 # --- Helper Function to Build Start Menu ---
-# <<< NEW HELPER FUNCTION >>>
 def _build_start_menu_content(user_id: int, username: str, lang_data: dict, context: ContextTypes.DEFAULT_TYPE) -> tuple[str, InlineKeyboardMarkup]:
     """Builds the text and keyboard for the start menu using provided lang_data."""
+    # <<< ADDED LOGGING >>>
+    logger.debug(f"_build_start_menu_content: Building menu for user {user_id} with lang_data starting with welcome: '{lang_data.get('welcome', 'N/A')}'")
+
     balance, purchases, basket_count = Decimal('0.0'), 0, 0
     conn = None
     try:
-        # Fetch required data
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT balance, total_purchases FROM users WHERE user_id = ?", (user_id,))
@@ -72,22 +82,22 @@ def _build_start_menu_content(user_id: int, username: str, lang_data: dict, cont
             balance = Decimal(str(result['balance']))
             purchases = result['total_purchases']
 
-        # Ensure basket count is up-to-date
-        clear_expired_basket(context, user_id) # Synchronous call
+        # Ensure basket count is up-to-date (handles expiration implicitly if needed)
+        # Note: clear_expired_basket itself is synchronous and modifies context
+        clear_expired_basket(context, user_id)
         basket = context.user_data.get("basket", [])
         basket_count = len(basket)
         if not basket: context.user_data.pop('applied_discount', None)
 
     except sqlite3.Error as e:
         logger.error(f"Database error fetching data for start menu build (user {user_id}): {e}", exc_info=True)
-        # Use defaults on error
     finally:
         if conn: conn.close()
 
-    # Build Message Text
+    # Build Message Text using the PASSED lang_data
     status = get_user_status(purchases)
     balance_str = format_currency(balance)
-    welcome_template = lang_data.get("welcome", "👋 Welcome, {username}!")
+    welcome_template = lang_data.get("welcome", "👋 Welcome, {username}!") # Use passed lang_data
     status_label = lang_data.get("status_label", "Status")
     balance_label = lang_data.get("balance_label", "Balance")
     purchases_label = lang_data.get("purchases_label", "Total Purchases")
@@ -105,7 +115,7 @@ def _build_start_menu_content(user_id: int, username: str, lang_data: dict, cont
         f"{purchases_line}\n{basket_line}\n\n{shopping_prompt}\n\n⚠️ {refund_note}"
     )
 
-    # Build Keyboard
+    # Build Keyboard using the PASSED lang_data
     shop_button_text = lang_data.get("shop_button", "Shop")
     profile_button_text = lang_data.get("profile_button", "Profile")
     top_up_button_text = lang_data.get("top_up_button", "Top Up")
@@ -138,34 +148,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     username = user.username or user.first_name or f"User_{user_id}"
 
-    # --- Send Bot Media (Only on direct /start, not callbacks) ---
+    # Send Bot Media (Only on direct /start, not callbacks)
     if not is_callback and BOT_MEDIA.get("type") and BOT_MEDIA.get("path"):
         media_path = BOT_MEDIA["path"]
         media_type = BOT_MEDIA["type"]
         logger.info(f"Attempting to send BOT_MEDIA: type={media_type}, path={media_path}")
-        # ... (rest of media sending code is unchanged) ...
         if await asyncio.to_thread(os.path.exists, media_path):
             try:
                 async with asyncio.to_thread(open, media_path, "rb") as file_content:
-                    if media_type == "photo":
-                        await context.bot.send_photo(chat_id=chat_id, photo=file_content)
-                    elif media_type == "video":
-                        await context.bot.send_video(chat_id=chat_id, video=file_content)
-                    elif media_type == "gif":
-                        await context.bot.send_animation(chat_id=chat_id, animation=file_content)
-                    else:
-                        logger.warning(f"Unsupported BOT_MEDIA type: {media_type}")
-            except FileNotFoundError:
-                logger.warning(f"BOT_MEDIA file not found at {media_path} despite initial check.")
-            except Exception as e:
-                logger.error(f"Error sending BOT_MEDIA: {e}", exc_info=True)
-        else:
-             logger.warning(f"BOT_MEDIA path {media_path} not found on disk.")
-    # --- End Send Bot Media ---
+                    if media_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=file_content)
+                    elif media_type == "video": await context.bot.send_video(chat_id=chat_id, video=file_content)
+                    elif media_type == "gif": await context.bot.send_animation(chat_id=chat_id, animation=file_content)
+                    else: logger.warning(f"Unsupported BOT_MEDIA type: {media_type}")
+            except FileNotFoundError: logger.warning(f"BOT_MEDIA file not found at {media_path} despite initial check.")
+            except Exception as e: logger.error(f"Error sending BOT_MEDIA: {e}", exc_info=True)
+        else: logger.warning(f"BOT_MEDIA path {media_path} not found on disk.")
 
-    # --- Ensure user exists and language context is set ---
-    lang = context.user_data.get("lang", None) # Check context first
-    if lang is None: # If not in context, load from DB or default
+    # Ensure user exists and language context is set
+    lang = context.user_data.get("lang", None)
+    if lang is None:
         conn = None
         try:
             conn = get_db_connection()
@@ -182,15 +183,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lang = db_lang if db_lang and db_lang in LANGUAGES else 'en'
             conn.commit()
             context.user_data["lang"] = lang # Store in context
+            logger.info(f"start: Set language for user {user_id} to '{lang}' from DB/default.")
         except sqlite3.Error as e:
             logger.error(f"DB error ensuring user/language in start for {user_id}: {e}")
             lang = 'en' # Default on error
             context.user_data["lang"] = lang
+            logger.warning(f"start: Defaulted language to 'en' for user {user_id} due to DB error.")
         finally:
             if conn: conn.close()
+    else:
+        logger.info(f"start: Using existing language '{lang}' from context for user {user_id}.")
 
-    # --- Build and Send/Edit Menu ---
-    lang, lang_data = _get_lang_data(context) # Get the final language data
+    # Build and Send/Edit Menu
+    lang, lang_data = _get_lang_data(context) # Get final language data again after ensuring it's set
     full_welcome, reply_markup = _build_start_menu_content(user_id, username, lang_data, context)
 
     if is_callback:
@@ -202,11 +207,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
              elif query: await query.answer() # Acknowledge if not modified
         except telegram_error.BadRequest as e:
               if "message is not modified" not in str(e).lower():
-                  logger.warning(f"Failed to edit start message: {e}. Sending new.")
+                  logger.warning(f"Failed to edit start message (callback): {e}. Sending new.")
                   await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=reply_markup, parse_mode=None)
               elif query: await query.answer()
         except Exception as e:
-             logger.error(f"Unexpected error editing start message: {e}", exc_info=True)
+             logger.error(f"Unexpected error editing start message (callback): {e}", exc_info=True)
              await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=reply_markup, parse_mode=None)
     else:
         await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=reply_markup, parse_mode=None)
@@ -218,9 +223,7 @@ async def handle_back_start(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     await start(update, context)
 
 # --- Shopping Handlers ---
-
 async def handle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays the list of cities for shopping."""
     query = update.callback_query
     user_id = query.from_user.id
     lang, lang_data = _get_lang_data(context)
@@ -232,7 +235,6 @@ async def handle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE, params
     home_button_text = lang_data.get("home_button", "Home")
 
     if not CITIES:
-        logger.warning(f"handle_shop: CITIES dictionary is empty for user {user_id}.")
         keyboard = [[InlineKeyboardButton(f"{EMOJI_HOME} {home_button_text}", callback_data="back_start")]]
         await query.edit_message_text(f"{EMOJI_CITY} {no_cities_available_msg}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
         return
@@ -259,7 +261,6 @@ async def handle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE, params
 
 
 async def handle_city_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays districts for the selected city (SHOPPING FLOW)."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     if not params: logger.warning("handle_city_selection called without city_id."); await query.answer("Error: City ID missing.", show_alert=True); return
@@ -287,7 +288,6 @@ async def handle_city_selection(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(f"{EMOJI_CITY} {city}\n\n{choose_district_prompt}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
 async def handle_district_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays product types available in the selected district (SHOPPING FLOW)."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     if not params or len(params) < 2: logger.warning("handle_district_selection missing params."); await query.answer("Error: City/District ID missing.", show_alert=True); return
@@ -324,7 +324,6 @@ async def handle_district_selection(update: Update, context: ContextTypes.DEFAUL
 
 
 async def handle_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays products (size/price variants) of the selected type (SHOPPING FLOW)."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     if not params or len(params) < 3: logger.warning("handle_type_selection missing params."); await query.answer("Error: City/District/Type missing.", show_alert=True); return
@@ -369,7 +368,6 @@ async def handle_type_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_product_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Shows details and 'Add to Basket' for a specific product variant (SHOPPING FLOW)."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     if not params or len(params) < 5: logger.warning("handle_product_selection missing params."); await query.answer("Error: Incomplete product data.", show_alert=True); return
@@ -422,7 +420,6 @@ async def handle_product_selection(update: Update, context: ContextTypes.DEFAULT
 
 
 async def handle_add_to_basket(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Adds a selected product to the user's basket (DB and context)."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     if not params or len(params) < 5: logger.warning("handle_add_to_basket missing params."); await query.answer("Error: Incomplete product data.", show_alert=True); return
@@ -524,9 +521,8 @@ async def handle_add_to_basket(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # --- Profile Handlers ---
-
+# (handle_profile unchanged)
 async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays the user's profile information."""
     query = update.callback_query
     user_id = query.from_user.id
     lang, lang_data = _get_lang_data(context)
@@ -570,14 +566,8 @@ async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, par
         if conn: conn.close()
 
 # --- Discount Validation (Synchronous) ---
-# (validate_discount_code function remains unchanged from previous version)
+# (validate_discount_code unchanged)
 def validate_discount_code(code_text: str, current_total_float: float) -> tuple[bool, str, dict | None]:
-    """
-    Validates a discount code against the database. Synchronous.
-    Args: current_total_float: The current basket total as a float.
-    Returns: (is_valid: bool, message: str, details: dict | None)
-             Details dict contains amounts as floats. Returns English messages.
-    """
     lang_data = LANGUAGES.get('en', {}) # Use English for internal messages
     no_code_msg = lang_data.get("no_code_provided", "No code provided.")
     not_found_msg = lang_data.get("discount_code_not_found", "Discount code not found.")
@@ -632,11 +622,9 @@ def validate_discount_code(code_text: str, current_total_float: float) -> tuple[
     finally:
         if conn: conn.close()
 
-
 # --- Basket Handlers ---
-# (handle_view_basket unchanged from previous version)
+# (handle_view_basket unchanged)
 async def handle_view_basket(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays the contents of the user's basket and applied discount."""
     query = update.callback_query
     user_id = query.from_user.id
     lang, lang_data = _get_lang_data(context)
@@ -747,11 +735,9 @@ async def handle_view_basket(update: Update, context: ContextTypes.DEFAULT_TYPE,
     finally:
          if conn: conn.close()
 
-
 # --- Discount Application Handlers ---
 # (apply_discount_start unchanged)
 async def apply_discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Prompts the user to enter a discount code."""
     query = update.callback_query
     user_id = query.from_user.id
     lang, lang_data = _get_lang_data(context)
@@ -769,7 +755,6 @@ async def apply_discount_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # (remove_discount unchanged)
 async def remove_discount(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Removes any applied discount code."""
     query = update.callback_query
     user_id = query.from_user.id
     lang, lang_data = _get_lang_data(context)
@@ -784,7 +769,6 @@ async def remove_discount(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
 
 # (handle_user_discount_code_message unchanged)
 async def handle_user_discount_code_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the user entering a discount code, validates, and applies it."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     state = context.user_data.get("state")
@@ -837,7 +821,6 @@ async def handle_user_discount_code_message(update: Update, context: ContextType
 # --- Remove From Basket ---
 # (handle_remove_from_basket unchanged)
 async def handle_remove_from_basket(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Removes a specific item from the user's basket."""
     query = update.callback_query
     user_id = query.from_user.id
     lang, lang_data = _get_lang_data(context)
@@ -889,10 +872,9 @@ async def handle_remove_from_basket(update: Update, context: ContextTypes.DEFAUL
         elif context.user_data.get('applied_discount'):
              applied_discount_info = context.user_data['applied_discount']
              basket_total_after_removal = float(sum(item.get('price', Decimal('0.0')) for item in context.user_data['basket']))
-             # Validation message is English
              code_valid, _, _ = validate_discount_code(applied_discount_info['code'], basket_total_after_removal)
              if not code_valid: context.user_data.pop('applied_discount', None);
-        discount_removed_answer = lang_data.get("discount_removed_invalid_basket", "Discount removed (basket changed).") # Use a specific message if needed
+        discount_removed_answer = lang_data.get("discount_removed_invalid_basket", "Discount removed (basket changed).")
         await query.answer(discount_removed_answer, show_alert=False)
 
     except sqlite3.Error as e:
@@ -907,7 +889,6 @@ async def handle_remove_from_basket(update: Update, context: ContextTypes.DEFAUL
 
 # (handle_clear_basket unchanged)
 async def handle_clear_basket(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Clears all items from the user's basket."""
     query = update.callback_query
     user_id = query.from_user.id
     lang, lang_data = _get_lang_data(context)
@@ -946,7 +927,6 @@ async def handle_clear_basket(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- Other User Handlers ---
 # (handle_view_history unchanged)
 async def handle_view_history(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays the user's recent purchase history."""
     query = update.callback_query
     user_id = query.from_user.id
     lang, lang_data = _get_lang_data(context)
@@ -975,43 +955,36 @@ async def handle_view_history(update: Update, context: ContextTypes.DEFAULT_TYPE
         else: await query.answer()
 
 
-# --- MODIFIED Language Selection Handler ---
+# --- Language Selection ---
+# (handle_language_selection is the modified version)
 async def handle_language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Allows the user to select language and immediately refreshes the start menu."""
     query = update.callback_query
     user_id = query.from_user.id
     current_lang, current_lang_data = _get_lang_data(context)
-    username = update.effective_user.username or update.effective_user.first_name or f"User_{user_id}" # Needed for menu build
+    username = update.effective_user.username or update.effective_user.first_name or f"User_{user_id}"
     conn = None
 
-    if params:  # Language code passed in callback data (user selected a new language)
+    if params:
         new_lang = params[0]
         if new_lang in LANGUAGES:
             try:
-                # 1. Update Database
                 conn = get_db_connection()
                 c = conn.cursor()
                 c.execute("UPDATE users SET language = ? WHERE user_id = ?", (new_lang, user_id))
                 conn.commit()
                 logger.info(f"User {user_id} DB language updated to {new_lang}")
 
-                # 2. Update Context
                 context.user_data["lang"] = new_lang
                 logger.info(f"User {user_id} context language updated to {new_lang}")
 
-                # 3. Acknowledge Button Press
                 new_lang_data = LANGUAGES.get(new_lang, LANGUAGES['en'])
                 language_set_answer = new_lang_data.get("language_set_answer", "Language set!")
                 await query.answer(language_set_answer.format(lang=new_lang.upper()))
 
-                # 4. Build and Edit Menu Directly
                 logger.info(f"Rebuilding start menu in {new_lang} for user {user_id}")
                 start_menu_text, start_menu_markup = _build_start_menu_content(user_id, username, new_lang_data, context)
-                await query.edit_message_text(
-                    start_menu_text,
-                    reply_markup=start_menu_markup,
-                    parse_mode=None
-                )
+                await query.edit_message_text(start_menu_text, reply_markup=start_menu_markup, parse_mode=None)
                 logger.info(f"Successfully edited message to show start menu in {new_lang}")
 
             except sqlite3.Error as e:
@@ -1019,22 +992,20 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
                 if conn and conn.in_transaction: conn.rollback()
                 error_saving_lang = current_lang_data.get("error_saving_language", "Error saving.")
                 await query.answer(error_saving_lang, show_alert=True)
-                # Attempt to show the language menu again on failure
                 await _display_language_menu(update, context, current_lang, current_lang_data)
             except Exception as e:
                 logger.error(f"Unexpected error in language selection update for user {user_id}: {e}", exc_info=True)
                 await query.answer("An error occurred.", show_alert=True)
-                # Attempt to show the language menu again on failure
                 await _display_language_menu(update, context, current_lang, current_lang_data)
             finally:
                 if conn: conn.close()
         else:
              invalid_lang_answer = current_lang_data.get("invalid_language_answer", "Invalid language.")
              await query.answer(invalid_lang_answer, show_alert=True)
-    else:  # Display language selection menu (user clicked the main 'Language' button)
+    else:
         await _display_language_menu(update, context, current_lang, current_lang_data)
 
-# <<< NEW HELPER FUNCTION >>>
+# (_display_language_menu helper unchanged)
 async def _display_language_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, current_lang: str, current_lang_data: dict):
      """Helper function to display the language selection keyboard."""
      query = update.callback_query
@@ -1046,14 +1017,21 @@ async def _display_language_menu(update: Update, context: ContextTypes.DEFAULT_T
      keyboard.append([InlineKeyboardButton(f"{EMOJI_BACK} {back_button_text}", callback_data="back_start")])
      lang_select_prompt = current_lang_data.get("language", "🌐 Select Language:")
      try:
-        await query.edit_message_text(lang_select_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        if query and query.message:
+            await query.edit_message_text(lang_select_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        else:
+             await send_message_with_retry(context.bot, update.effective_chat.id, lang_select_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
      except Exception as e:
          logger.error(f"Error displaying language menu: {e}")
+         try:
+             await send_message_with_retry(context.bot, update.effective_chat.id, lang_select_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+         except Exception as send_e:
+             logger.error(f"Failed to send language menu after edit error: {send_e}")
 
 
+# --- Price List ---
 # (handle_price_list unchanged)
 async def handle_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Shows the city selection specifically for viewing price lists."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
 
@@ -1068,7 +1046,6 @@ async def handle_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 # (handle_price_list_city unchanged)
 async def handle_price_list_city(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays the formatted price list for the selected city."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     if not params: logger.warning("handle_price_list_city no city_id."); await query.answer("Error: City ID missing.", show_alert=True); return
@@ -1128,9 +1105,8 @@ async def handle_price_list_city(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # --- Review Handlers ---
-# (handle_reviews_menu unchanged)
+# (handle_reviews_menu, handle_leave_review, handle_leave_review_message, handle_view_reviews, handle_leave_review_now unchanged)
 async def handle_reviews_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Shows the main menu for reviews (View or Leave)."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     review_prompt = lang_data.get("reviews", "📝 Reviews Menu")
@@ -1145,9 +1121,8 @@ async def handle_reviews_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(review_prompt, reply_markup=reply_markup, parse_mode=None)
 
-# (handle_leave_review unchanged)
+
 async def handle_leave_review(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Prompts user for review text."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     context.user_data["state"] = "awaiting_review"
@@ -1162,9 +1137,8 @@ async def handle_leave_review(update: Update, context: ContextTypes.DEFAULT_TYPE
         else: await query.answer()
     except Exception as e: logger.error(f"Unexpected error handle_leave_review: {e}", exc_info=True); await query.answer("Error occurred.", show_alert=True)
 
-# (handle_leave_review_message unchanged)
+
 async def handle_leave_review_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the text message containing the user's review."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     state = context.user_data.get("state")
@@ -1226,9 +1200,7 @@ async def handle_leave_review_message(update: Update, context: ContextTypes.DEFA
     finally:
         if conn: conn.close()
 
-# (handle_view_reviews unchanged)
 async def handle_view_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays reviews paginated for users."""
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     offset = 0; reviews_per_page = 5
@@ -1261,7 +1233,6 @@ async def handle_view_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE
         if "message is not modified" not in str(e).lower(): logger.warning(f"Failed edit view_reviews: {e}"); await query.answer(error_updating_review_list, show_alert=True)
         else: await query.answer()
 
-# (handle_leave_review_now unchanged)
 async def handle_leave_review_now(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Callback handler specifically for the 'Leave Review Now' button after purchase."""
     await handle_leave_review(update, context, params)
@@ -1269,7 +1240,6 @@ async def handle_leave_review_now(update: Update, context: ContextTypes.DEFAULT_
 # --- Refill Handlers ---
 # (handle_refill unchanged)
 async def handle_refill(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Handles the refill/top-up button press."""
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
@@ -1305,7 +1275,6 @@ async def handle_refill(update: Update, context: ContextTypes.DEFAULT_TYPE, para
 
 # (handle_refill_amount_message unchanged)
 async def handle_refill_amount_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the user entering the top-up amount and shows crypto choices."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     state = context.user_data.get("state")
