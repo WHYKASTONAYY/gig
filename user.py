@@ -84,25 +84,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     username = user.username or user.first_name or f"User_{user_id}"
     # Use Decimal for balance
-    lang, theme, balance, purchases, basket_count = 'en', 'default', Decimal('0.0'), 0, 0
+    balance, purchases, basket_count = Decimal('0.0'), 0, 0
     conn = None
+
+    # <<< MODIFICATION START >>>
+    # Prioritize language already set in context (especially for callbacks like language change)
+    lang = context.user_data.get("lang", None)
+    theme = context.user_data.get("theme", "default") # Theme less critical, keep default
+    # <<< MODIFICATION END >>>
+
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("BEGIN TRANSACTION")
+        # Insert or update user, but don't overwrite existing language/theme here yet
         c.execute("""
             INSERT INTO users (user_id, username, balance, total_purchases, language, theme, basket)
             VALUES (?, ?, 0.0, 0, 'en', 'default', '')
             ON CONFLICT(user_id) DO UPDATE SET username=excluded.username
         """, (user_id, username))
+
+        # Fetch user data from DB
         c.execute("SELECT balance, total_purchases, language, theme, basket FROM users WHERE user_id = ?", (user_id,))
         result = c.fetchone()
+
         if result:
             balance = Decimal(str(result['balance'])) # Load balance as Decimal
             purchases = result['total_purchases']
-            db_lang = result['language']; db_theme = result['theme']
-            lang = db_lang if db_lang and db_lang in LANGUAGES else 'en'
+            db_lang = result['language']
+            db_theme = result['theme']
+
+            # <<< MODIFICATION START >>>
+            # If language wasn't already in context, use the one from DB
+            if lang is None:
+                lang = db_lang if db_lang and db_lang in LANGUAGES else 'en'
+            # Use theme from DB if valid, otherwise keep default
             theme = db_theme if db_theme and db_theme in THEMES else 'default'
+            # <<< MODIFICATION END >>>
+
             # Load basket from DB only if not already in context (or if context is empty)
             # This prevents overwriting an active basket in context during simple /start calls
             if not context.user_data.get('basket'):
@@ -129,9 +148,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"Loaded/validated basket from DB for user {user_id}. Items: {len(basket_items)}")
                 else:
                     context.user_data['basket'] = [] # Ensure it's an empty list if DB is empty/null
+        else:
+            # User wasn't in DB (shouldn't happen due to INSERT above, but safety check)
+            lang = 'en' # Default if DB read fails unexpectedly
+            theme = 'default'
+            context.user_data['basket'] = []
+
         conn.commit()
+
+        # Ensure context is updated with the final determined language/theme
         context.user_data["lang"] = lang
         context.user_data["theme"] = theme
+
         # Basket is now loaded above or defaults to existing context basket
         basket = context.user_data.get("basket", [])
         basket_count = len(basket)
@@ -149,7 +177,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn: conn.close()
 
     # Prepare welcome message (plain text)
+    # <<< MODIFICATION START >>>
+    # Use the 'lang' variable determined above (prioritizing context)
     lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
+    # <<< MODIFICATION END >>>
+
     status = get_user_status(purchases)
     balance_str = format_currency(balance) # Format Decimal balance
     welcome_template = lang_data.get("welcome", "👋 Welcome, {username}!")
@@ -1012,7 +1044,7 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     user_id = query.from_user.id
     current_lang = context.user_data.get("lang", "en")
-    lang_data = LANGUAGES.get(current_lang, LANGUAGES['en'])
+    lang_data = LANGUAGES.get(current_lang, LANGUAGES['en']) # Get data for the current language for button text
     conn = None
 
     if params:  # Language code passed in callback data
@@ -1023,12 +1055,17 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
                 c = conn.cursor()
                 c.execute("UPDATE users SET language = ? WHERE user_id = ?", (new_lang, user_id))
                 conn.commit()
+                # IMPORTANT: Update context *before* calling start()
                 context.user_data["lang"] = new_lang
                 logger.info(f"User {user_id} changed language to {new_lang}")
-                await start(update, context)  # Refresh start menu
                 language_set_answer = LANGUAGES.get(new_lang, {}).get("language_set_answer", "Language set!")
                 await query.answer(language_set_answer.format(lang=new_lang.upper()))
-            except sqlite3.Error as e: logger.error(f"DB error updating language user {user_id}: {e}"); error_saving_lang = lang_data.get("error_saving_language", "Error saving."); await query.answer(error_saving_lang, show_alert=True)
+                await start(update, context)  # Refresh start menu using the *new* language context
+            except sqlite3.Error as e:
+                logger.error(f"DB error updating language user {user_id}: {e}");
+                # Use current_lang_data for error message if new lang update failed
+                error_saving_lang = lang_data.get("error_saving_language", "Error saving.")
+                await query.answer(error_saving_lang, show_alert=True)
             finally:
                 if conn: conn.close()
         else: invalid_lang_answer = lang_data.get("invalid_language_answer", "Invalid language."); await query.answer(invalid_lang_answer, show_alert=True)
@@ -1037,8 +1074,10 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
         for lang_code, lang_dict_for_name in LANGUAGES.items():
             lang_name = lang_dict_for_name.get("native_name", lang_code.upper())
             keyboard.append([InlineKeyboardButton(f"{lang_name} {'✅' if lang_code == current_lang else ''}", callback_data=f"language|{lang_code}")])
+        # Use current_lang_data for button text
         back_button_text = lang_data.get("back_button", "Back")
         keyboard.append([InlineKeyboardButton(f"{EMOJI_BACK} {back_button_text}", callback_data="back_start")])
+        # Use current_lang_data for prompt
         lang_select_prompt = lang_data.get("language", "🌐 Select Language:")
         await query.edit_message_text(lang_select_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
