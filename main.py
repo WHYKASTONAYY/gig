@@ -392,22 +392,23 @@ def nowpayments_webhook():
         logger.error("Webhook received but Telegram app or event loop not initialized.")
         return Response(status=503) # Service Unavailable
 
-    # --- Verify Signature FIRST ---
-    signature = request.headers.get('x-nowpayments-sig')
-    # Use the verify_nowpayments_signature function defined earlier
-    #if not verify_nowpayments_signature(request, signature, NOWPAYMENTS_IPN_SECRET):
-        logger.error("Invalid NOWPayments webhook signature received or verification failed.")
-       # return Response("Invalid Signature", status=401) # Unauthorized
-   # logger.info("NOWPayments webhook signature verified.")
-    # -----------------------------
+    # --- SIGNATURE VERIFICATION TEMPORARILY DISABLED FOR DEBUGGING ---
+    # signature = request.headers.get('x-nowpayments-sig')
+    # # Use the verify_nowpayments_signature function defined earlier
+    # if not verify_nowpayments_signature(request, signature, NOWPAYMENTS_IPN_SECRET):
+    #     logger.error("Invalid NOWPayments webhook signature received or verification failed.") # <--- Check indent here
+    #     return Response("Invalid Signature", status=401) # Unauthorized           # <--- Check indent here
+    # logger.info("NOWPayments webhook signature verified.")                        # <--- Check indent here
+    logger.warning("!!! NOWPayments signature verification is temporarily disabled !!!") # This line MUST have the same indent as the 'if not telegram_app...' block above
+    # ------------------------------------------------------------------
 
-    # Proceed only if signature is valid
+    # Proceed without signature check (These lines must be indented correctly)
     if not request.is_json:
-        logger.warning("Webhook received non-JSON request (after signature check).")
+        logger.warning("Webhook received non-JSON request.")
         return Response("Invalid Request", status=400)
 
     data = request.get_json()
-    logger.info(f"NOWPayments IPN received (verified): {json.dumps(data)}")
+    logger.info(f"NOWPayments IPN received (UNVERIFIED): {json.dumps(data)}")
 
     # --- Basic Validation ---
     # Need 'actually_paid' to determine the credited amount
