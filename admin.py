@@ -135,7 +135,7 @@ async def _prepare_and_confirm_drop(
              logger.error(f"Error setting up/during media download loop user {user_id}: {e}", exc_info=True)
              await send_message_with_retry(context.bot, chat_id, "⚠️ Warning: Error during media processing. Drop will be added without media.", parse_mode=None)
              media_list_for_db = [] # Reset list if temp dir failed etc.
-             if temp_dir and os.path.exists(temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True); temp_dir = None
+             if temp_dir and await asyncio.to_thread(os.path.exists, temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True); temp_dir = None
 
     # --- Prepare Confirmation ---
     # Use the passed user_data dictionary
@@ -189,11 +189,6 @@ async def _process_collected_media(context: ContextTypes.DEFAULT_TYPE):
     user_data = context.application.user_data.get(user_id, {})
     if not user_data:
          logger.error(f"Job {media_group_id}: Could not find user_data for user {user_id}.")
-         # Attempt to clean up potential leftovers if they exist globally (less ideal)
-         # Note: Direct access to context.user_data here might refer to the bot's own data, not the specific user's.
-         # Relying on the application.user_data retrieval above is better.
-         # if context.user_data and 'collected_media' in context.user_data:
-         #      context.user_data.get('collected_media', {}).pop(media_group_id, None)
          return
 
     # Retrieve collected data from the specific user's dictionary
@@ -728,7 +723,7 @@ async def handle_confirm_add_drop(update: Update, context: ContextTypes.DEFAULT_
 
     if not all([city, district, p_type, size, price is not None]):
         logger.error(f"Missing data in pending_drop for user {user_id}: {pending_drop}")
-        if temp_dir and os.path.exists(temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+        if temp_dir and await asyncio.to_thread(os.path.exists, temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
         keys_to_clear = ["state", "pending_drop", "pending_drop_size", "pending_drop_price", "admin_city_id", "admin_district_id", "admin_product_type", "admin_city", "admin_district"]
         for key in keys_to_clear: user_specific_data.pop(key, None)
         return await query.edit_message_text("❌ Error: Incomplete drop data. Please start again.", parse_mode=None)
@@ -784,7 +779,7 @@ async def handle_confirm_add_drop(update: Update, context: ContextTypes.DEFAULT_
         logger.info(f"Successfully added product {product_id} ({product_name}) to database.")
 
         # Clean up the temporary directory AFTER successful commit and move
-        if temp_dir and os.path.exists(temp_dir):
+        if temp_dir and await asyncio.to_thread(os.path.exists, temp_dir):
             await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
             logger.info(f"Cleaned up temporary directory: {temp_dir}")
 
@@ -810,7 +805,7 @@ async def handle_confirm_add_drop(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Error saving confirmed drop for user {user_id}: {e}", exc_info=True)
         await query.edit_message_text("❌ Error: Failed to save the drop. Please check logs and try again.", parse_mode=None)
         # Clean up temp dir on error as well
-        if temp_dir and os.path.exists(temp_dir):
+        if temp_dir and await asyncio.to_thread(os.path.exists, temp_dir):
             await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
             logger.info(f"Cleaned up temporary directory after error: {temp_dir}")
     finally:
@@ -833,7 +828,7 @@ async def cancel_add(update: Update, context: ContextTypes.DEFAULT_TYPE, params=
     # Clean up temporary directory if it exists
     if pending_drop and "temp_dir" in pending_drop and pending_drop["temp_dir"]:
         temp_dir_path = pending_drop["temp_dir"]
-        if os.path.exists(temp_dir_path):
+        if await asyncio.to_thread(os.path.exists, temp_dir_path):
             try:
                 await asyncio.to_thread(shutil.rmtree, temp_dir_path, ignore_errors=True)
                 logger.info(f"Cleaned up temp dir on cancel: {temp_dir_path}")
@@ -1792,7 +1787,7 @@ async def handle_confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE,
                      # Delete associated media folders (run in background)
                      for pid in product_ids_to_delete:
                           media_dir_to_del = os.path.join(MEDIA_DIR, str(pid))
-                          if os.path.exists(media_dir_to_del):
+                          if await asyncio.to_thread(os.path.exists, media_dir_to_del):
                               asyncio.create_task(asyncio.to_thread(shutil.rmtree, media_dir_to_del, ignore_errors=True))
                               logger.info(f"Scheduled deletion of media dir: {media_dir_to_del}")
                  c.execute("DELETE FROM products WHERE city = ?", (city_name,))
@@ -1823,7 +1818,7 @@ async def handle_confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE,
                      # Delete associated media folders
                      for pid in product_ids_to_delete:
                           media_dir_to_del = os.path.join(MEDIA_DIR, str(pid))
-                          if os.path.exists(media_dir_to_del):
+                          if await asyncio.to_thread(os.path.exists, media_dir_to_del):
                               asyncio.create_task(asyncio.to_thread(shutil.rmtree, media_dir_to_del, ignore_errors=True))
                               logger.info(f"Scheduled deletion of media dir: {media_dir_to_del}")
                  c.execute("DELETE FROM products WHERE city = ? AND district = ?", (city_name, district_name))
@@ -1848,7 +1843,7 @@ async def handle_confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE,
                   success_msg = f"✅ Product ID {product_id} removed!"
                   # Schedule media directory deletion (using MEDIA_DIR)
                   media_dir_to_delete = os.path.join(MEDIA_DIR, str(product_id))
-                  if os.path.exists(media_dir_to_delete):
+                  if await asyncio.to_thread(os.path.exists, media_dir_to_delete):
                        asyncio.create_task(asyncio.to_thread(shutil.rmtree, media_dir_to_delete, ignore_errors=True))
                        logger.info(f"Scheduled deletion of media dir: {media_dir_to_delete}")
                   if back_details_tuple and all([back_details_tuple['city_id'], back_details_tuple['dist_id'], back_details_tuple['product_type']]):
@@ -2200,17 +2195,42 @@ async def handle_adm_bot_media_message(update: Update, context: ContextTypes.DEF
         BOT_MEDIA["type"] = new_media_type
         BOT_MEDIA["path"] = final_media_path # Store the correct persistent path
 
+        # --- CORRECTED JSON WRITING ---
         # Use BOT_MEDIA_JSON_PATH from utils
         try:
-            # Use asyncio.to_thread for file writing
-            async def write_json_async(path, data):
-                with open(path, 'w') as f:
-                    json.dump(data, f, indent=4)
-            await asyncio.to_thread(write_json_async, BOT_MEDIA_JSON_PATH, BOT_MEDIA)
-            logger.info(f"Successfully wrote updated BOT_MEDIA to {BOT_MEDIA_JSON_PATH}: {BOT_MEDIA}")
-        except Exception as e:
-            logger.error(f"Failed to write {BOT_MEDIA_JSON_PATH}: {e}")
+            # Define a SYNCHRONOUS function for the actual file writing
+            def write_json_sync(path, data):
+                try:
+                    with open(path, 'w') as f:
+                        json.dump(data, f, indent=4)
+                    logger.info(f"Successfully wrote updated BOT_MEDIA to {path}: {data}")
+                    return True # Indicate success
+                except Exception as e_sync:
+                    logger.error(f"Failed during synchronous write to {path}: {e_sync}")
+                    return False # Indicate failure
 
+            # Run the SYNCHRONOUS function in a separate thread using asyncio.to_thread
+            write_successful = await asyncio.to_thread(write_json_sync, BOT_MEDIA_JSON_PATH, BOT_MEDIA)
+
+            if not write_successful:
+                # Handle the error if the write failed within the thread
+                raise IOError(f"Failed to write bot media configuration to {BOT_MEDIA_JSON_PATH}")
+
+            # Optional: Reload data globally if you need the change reflected immediately without restart
+            # load_all_data() # This function is defined in utils.py
+
+        except Exception as e:
+            logger.error(f"Error during bot media JSON writing process: {e}")
+            # Handle the error appropriately, maybe send a message back to the admin
+            await send_message_with_retry(context.bot, chat_id, f"❌ Error saving media configuration: {e}", parse_mode=None)
+            # Potentially clean up the downloaded file if the config save failed
+            if await asyncio.to_thread(os.path.exists, final_media_path):
+                 try: await asyncio.to_thread(os.remove, final_media_path)
+                 except OSError: pass
+            return # Stop processing if save failed
+        # --- END OF CORRECTED JSON WRITING ---
+
+        # --- Continue only if save was successful ---
         await send_message_with_retry(context.bot, chat_id, "✅ Bot Media Updated Successfully!", parse_mode=None)
         keyboard = [[InlineKeyboardButton("⬅️ Back to Admin Menu", callback_data="admin_menu")]]
         await send_message_with_retry(context.bot, chat_id, "Changes applied.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
