@@ -153,16 +153,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         media_path = BOT_MEDIA["path"]
         media_type = BOT_MEDIA["type"]
         logger.info(f"Attempting to send BOT_MEDIA: type={media_type}, path={media_path}")
+
+        # Check if file exists using asyncio.to_thread
         if await asyncio.to_thread(os.path.exists, media_path):
             try:
-                async with asyncio.to_thread(open, media_path, "rb") as file_content:
-                    if media_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=file_content)
-                    elif media_type == "video": await context.bot.send_video(chat_id=chat_id, video=file_content)
-                    elif media_type == "gif": await context.bot.send_animation(chat_id=chat_id, animation=file_content)
-                    else: logger.warning(f"Unsupported BOT_MEDIA type: {media_type}")
-            except FileNotFoundError: logger.warning(f"BOT_MEDIA file not found at {media_path} despite initial check.")
-            except Exception as e: logger.error(f"Error sending BOT_MEDIA: {e}", exc_info=True)
-        else: logger.warning(f"BOT_MEDIA path {media_path} not found on disk.")
+                # --- FIX STARTS HERE ---
+                # Pass the file path directly to the send_* methods
+                if media_type == "photo":
+                    await context.bot.send_photo(chat_id=chat_id, photo=media_path)
+                elif media_type == "video":
+                    await context.bot.send_video(chat_id=chat_id, video=media_path)
+                elif media_type == "gif":
+                    # Note: GIFs might be sent as animation or video depending on how they were saved.
+                    # If saved as .mp4 (common for GIFs by bots), send_animation is usually correct.
+                    # If saved as .gif, send_animation should also work.
+                    await context.bot.send_animation(chat_id=chat_id, animation=media_path)
+                else:
+                    logger.warning(f"Unsupported BOT_MEDIA type for sending: {media_type}")
+                # --- FIX ENDS HERE ---
+
+            except telegram_error.TelegramError as e:
+                # Catch potential errors during sending (e.g., file too large, network issue)
+                logger.error(f"Error sending BOT_MEDIA ({media_path}): {e}", exc_info=True)
+            except Exception as e:
+                # Catch any other unexpected errors during sending
+                logger.error(f"Unexpected error sending BOT_MEDIA ({media_path}): {e}", exc_info=True)
+        else:
+            logger.warning(f"BOT_MEDIA path {media_path} not found on disk when trying to send.")
+
 
     # Ensure user exists and language context is set
     lang = context.user_data.get("lang", None)
@@ -214,6 +232,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
              logger.error(f"Unexpected error editing start message (callback): {e}", exc_info=True)
              await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=reply_markup, parse_mode=None)
     else:
+        # Send the main welcome message *after* attempting to send the media
         await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=reply_markup, parse_mode=None)
 
 
@@ -873,9 +892,10 @@ async def handle_remove_from_basket(update: Update, context: ContextTypes.DEFAUL
              applied_discount_info = context.user_data['applied_discount']
              basket_total_after_removal = float(sum(item.get('price', Decimal('0.0')) for item in context.user_data['basket']))
              code_valid, _, _ = validate_discount_code(applied_discount_info['code'], basket_total_after_removal)
-             if not code_valid: context.user_data.pop('applied_discount', None);
-        discount_removed_answer = lang_data.get("discount_removed_invalid_basket", "Discount removed (basket changed).")
-        await query.answer(discount_removed_answer, show_alert=False)
+             if not code_valid:
+                 reason_removed = lang_data.get("discount_removed_invalid_basket", "Discount removed (basket changed).")
+                 context.user_data.pop('applied_discount', None);
+                 await query.answer(reason_removed, show_alert=False) # Notify user why it was removed
 
     except sqlite3.Error as e:
         if conn and conn.in_transaction: conn.rollback()
@@ -1126,11 +1146,11 @@ async def handle_leave_review(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     lang, lang_data = _get_lang_data(context)
     context.user_data["state"] = "awaiting_review"
-    enter_review_prompt = lang_data.get("enter_review_prompt", "Please type your review:"); cancel_button_text = lang_data.get("cancel_button", "Cancel"); prompt_msg = f"✍️ {enter_review_prompt}"
+    enter_review_prompt = lang_data.get("enter_review_prompt", "Please type your review message and send it."); cancel_button_text = lang_data.get("cancel_button", "Cancel"); prompt_msg = f"✍️ {enter_review_prompt}"
     keyboard = [[InlineKeyboardButton(f"❌ {cancel_button_text}", callback_data="reviews")]]
     try:
         await query.edit_message_text(prompt_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
-        enter_review_answer = lang_data.get("enter_review_answer", "Enter review in chat.")
+        enter_review_answer = lang_data.get("enter_review_answer", "Enter your review in the chat.")
         await query.answer(enter_review_answer)
     except telegram_error.BadRequest as e:
         if "message is not modified" not in str(e).lower(): logger.error(f"Error editing leave review prompt: {e}"); await send_message_with_retry(context.bot, update.effective_chat.id, prompt_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None); await query.answer()
