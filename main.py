@@ -392,14 +392,14 @@ def nowpayments_webhook():
         logger.error("Webhook received but Telegram app or event loop not initialized.")
         return Response(status=503) # Service Unavailable
 
-    # --- SIGNATURE VERIFICATION (Keep disabled or re-enable as needed) ---
+    # --- SIGNATURE VERIFICATION (Ensure this is enabled in production!) ---
     # signature = request.headers.get('x-nowpayments-sig')
     # if not verify_nowpayments_signature(request, signature, NOWPAYMENTS_IPN_SECRET):
     #     logger.error("Invalid NOWPayments webhook signature received or verification failed.")
-    #     return Response("Invalid Signature", status=401)
+    #     return Response("Invalid Signature", status=401) # Unauthorized
     # logger.info("NOWPayments webhook signature verified.")
-    logger.warning("!!! NOWPayments signature verification is temporarily disabled !!!")
-    # ------------------------------------------------------------------
+    logger.warning("!!! NOWPayments signature verification is temporarily disabled !!!") # REMOVE THIS LINE IN PRODUCTION
+    # ---------------------------------------------------------------------------
 
     if not request.is_json:
         logger.warning("Webhook received non-JSON request.")
@@ -418,14 +418,19 @@ def nowpayments_webhook():
     pay_currency = data.get('pay_currency')
     actually_paid_str = data.get('actually_paid')
 
-    lang_data = LANGUAGES.get('en', {})
+    lang_data = LANGUAGES.get('en', {}) # Default language
 
-    if status in ['finished', 'confirmed'] and actually_paid_str is not None:
+    # --- Process 'finished', 'confirmed', OR 'partially_paid' status --- <<< MODIFIED HERE
+    if status in ['finished', 'confirmed', 'partially_paid'] and actually_paid_str is not None:
         logger.info(f"Processing '{status}' payment: {payment_id}")
         try:
             actually_paid_decimal = Decimal(str(actually_paid_str))
             if actually_paid_decimal <= 0:
+                # Even for partially_paid, if actually_paid is 0, ignore it.
                 logger.warning(f"Ignoring webhook for payment {payment_id} with zero or negative 'actually_paid' amount: {actually_paid_decimal}")
+                # Consider removing pending if status is 'finished' or 'partially_paid' with 0 amount? Optional.
+                # if status != 'confirmed':
+                #     asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
                 return Response("Zero amount paid", status=200)
 
             pending_info = asyncio.run_coroutine_threadsafe(
@@ -443,7 +448,7 @@ def nowpayments_webhook():
                      asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
                      return Response("Currency mismatch", status=400)
 
-                # --- Calculate Credited EUR Amount (FIXED LOGIC) ---
+                # --- Calculate Credited EUR Amount (Proportional Logic) ---
                 credited_eur_amount = Decimal('0.0')
                 if expected_crypto_decimal > 0:
                     # ALWAYS calculate proportionally based on what was actually paid vs expected
@@ -455,17 +460,17 @@ def nowpayments_webhook():
                     elif actually_paid_decimal < expected_crypto_decimal:
                         payment_comparison = "underpaid"
 
-                    logger.info(f"Payment {payment_id}: User {user_id} {payment_comparison} ({actually_paid_decimal} {pay_currency} vs expected {expected_crypto_decimal}). Crediting proportional {credited_eur_amount:.8f} EUR (based on target {target_eur_decimal} EUR).")
+                    logger.info(f"Payment {payment_id} ({status}): User {user_id} {payment_comparison} ({actually_paid_decimal} {pay_currency} vs expected {expected_crypto_decimal}). Crediting proportional {credited_eur_amount:.8f} EUR (based on target {target_eur_decimal} EUR).")
 
                 else:
                     # Fallback: If expected amount wasn't stored correctly. Log error.
-                    logger.error(f"Payment {payment_id}: Could not calculate proportional credit for user {user_id} because expected_crypto_amount was zero or invalid in DB ({pending_info.get('expected_crypto_amount')}). Crediting 0 EUR.")
+                    logger.error(f"Payment {payment_id} ({status}): Could not calculate proportional credit for user {user_id} because expected_crypto_amount was zero or invalid in DB ({pending_info.get('expected_crypto_amount')}). Crediting 0 EUR.")
                     credited_eur_amount = Decimal('0.0')
-                # --- END FIXED LOGIC ---
+                # --- END Proportional Logic ---
 
                 # Apply fee adjustment and round down to cents
                 credited_eur_amount = (credited_eur_amount * FEE_ADJUSTMENT).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
-                logger.info(f"Payment {payment_id}: Final credited amount after fee adjustment ({FEE_ADJUSTMENT}) and rounding: {credited_eur_amount:.2f} EUR.")
+                logger.info(f"Payment {payment_id} ({status}): Final credited amount after fee adjustment ({FEE_ADJUSTMENT}) and rounding: {credited_eur_amount:.2f} EUR.")
 
                 # --- Process Refill ---
                 if credited_eur_amount > 0:
@@ -477,19 +482,23 @@ def nowpayments_webhook():
                     try:
                          db_update_success = future.result(timeout=30)
                          if db_update_success:
+                              # Remove pending deposit ONLY after successful balance update
                               asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
-                              logger.info(f"Successfully processed and removed pending deposit {payment_id}")
+                              logger.info(f"Successfully processed and removed pending deposit {payment_id} (Status: {status})")
                          else:
-                              logger.critical(f"CRITICAL: Payment {payment_id} processed, but process_successful_refill failed for user {user_id}. Balance NOT updated. Pending deposit NOT removed. Manual intervention required.")
+                              # CRITICAL: Payment processed, but DB update failed. DO NOT remove pending deposit.
+                              logger.critical(f"CRITICAL: Payment {payment_id} ({status}) processed, but process_successful_refill failed for user {user_id}. Balance NOT updated. Pending deposit NOT removed. Manual intervention required.")
                     except asyncio.TimeoutError:
                          logger.error(f"Timeout waiting for process_successful_refill result for {payment_id}. Pending deposit NOT removed.")
                     except Exception as e:
                          logger.error(f"Error getting result from process_successful_refill for {payment_id}: {e}. Pending deposit NOT removed.", exc_info=True)
                 else:
-                    logger.warning(f"Payment {payment_id}: Calculated credited EUR is zero for user {user_id}. Removing pending deposit without updating balance.")
+                    # If calculated credit is zero (e.g., significant underpayment resulted in < 0.01 EUR), remove pending deposit
+                    logger.warning(f"Payment {payment_id} ({status}): Calculated credited EUR is zero for user {user_id}. Removing pending deposit without updating balance.")
                     asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
 
             else:
+                # Handle cases where webhook arrives but no pending deposit found
                 parent_payment_id = data.get('parent_payment_id')
                 if parent_payment_id:
                      logger.warning(f"Webhook Warning: Received update for payment ID {payment_id} (child of {parent_payment_id}), but no primary pending deposit found for {payment_id}. Might be overpayment/refund difference.")
@@ -501,8 +510,8 @@ def nowpayments_webhook():
         except Exception as e:
             logger.error(lang_data.get("webhook_processing_error", "Webhook Error: Could not process payment update {payment_id}.").format(payment_id=payment_id), exc_info=True)
 
-    # --- Process other statuses (failed, expired, etc.) ---
-    elif status in ['failed', 'expired', 'refunded', 'partially_paid']:
+    # --- Process other statuses (failed, expired, etc.) --- <<< MODIFIED HERE
+    elif status in ['failed', 'expired', 'refunded']: # Removed 'partially_paid'
         logger.warning(f"Payment {payment_id} has status '{status}'. Removing pending record.")
         # Check if pending deposit exists before trying to notify user
         pending_info_for_removal = None
@@ -539,6 +548,7 @@ def nowpayments_webhook():
 
 
     else:
+         # Ignores 'waiting', 'confirming', 'sending', etc.
          logger.info(f"Webhook received for payment {payment_id} with status: {status} (ignored).")
 
     return Response(status=200) # Always acknowledge receipt
