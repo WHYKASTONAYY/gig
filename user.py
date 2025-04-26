@@ -5,12 +5,13 @@ import time
 import logging
 import asyncio
 import os # Import os for path joining
+import json # <--- Added for reading bot_media.json
 from datetime import datetime, timezone
 from collections import defaultdict, Counter
 from decimal import Decimal # Use Decimal for financial calculations
 
 # --- Telegram Imports ---
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove # <<< ADDED ReplyKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram import helpers
@@ -19,13 +20,15 @@ import telegram.error as telegram_error
 
 # Import from utils
 from utils import (
-    CITIES, DISTRICTS, PRODUCT_TYPES, THEMES, LANGUAGES, BOT_MEDIA, ADMIN_ID, BASKET_TIMEOUT, MIN_DEPOSIT_EUR,
+    CITIES, DISTRICTS, PRODUCT_TYPES, THEMES, LANGUAGES, ADMIN_ID, BASKET_TIMEOUT, MIN_DEPOSIT_EUR,
     format_currency, get_progress_bar, send_message_with_retry, format_discount_value,
     clear_expired_basket, fetch_last_purchases, get_user_status, fetch_reviews,
     NOWPAYMENTS_API_KEY, # Check if NOWPayments is configured
-    get_db_connection, MEDIA_DIR, # Import helper and MEDIA_DIR
+    get_db_connection, MEDIA_DIR, BOT_MEDIA_JSON_PATH, # <--- Import BOT_MEDIA_JSON_PATH
     DEFAULT_PRODUCT_EMOJI # Import default emoji
 )
+# NOTE: We still import BOT_MEDIA from utils for initial load/fallback, but will prioritize reading the file in start()
+from utils import BOT_MEDIA
 
 # Logging setup
 logger = logging.getLogger(__name__)
@@ -33,8 +36,7 @@ logger = logging.getLogger(__name__)
 # Emojis (Defaults/Placeholders)
 EMOJI_CITY = "🏙️"
 EMOJI_DISTRICT = "🏘️"
-# EMOJI_PRODUCT = "💎" # No longer primary source
-EMOJI_HERB = "🌿" # Keep for potential specific logic if needed
+EMOJI_HERB = "🌿"
 EMOJI_PRICE = "💰"
 EMOJI_QUANTITY = "🔢"
 EMOJI_BASKET = "🛒"
@@ -53,22 +55,18 @@ EMOJI_DISCOUNT = "🏷️"
 def _get_lang_data(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, dict]:
     """Gets the current language code and corresponding language data dictionary."""
     lang = context.user_data.get("lang", "en")
-    # <<< ADDED LOGGING >>>
     logger.debug(f"_get_lang_data: Retrieved lang '{lang}' from context.user_data.")
     lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
     if lang not in LANGUAGES:
         logger.warning(f"_get_lang_data: Language '{lang}' not found in LANGUAGES dict. Falling back to 'en'.")
-        lang = 'en' # Ensure lang variable reflects the fallback
-    # <<< ADDED LOGGING >>>
-    # Log first few keys for debugging, limit length if too many keys
+        lang = 'en'
     keys_sample = list(lang_data.keys())[:5]
     logger.debug(f"_get_lang_data: Returning lang '{lang}' and lang_data keys sample: {keys_sample}...")
     return lang, lang_data
 
 # --- Helper Function to Build Start Menu ---
 def _build_start_menu_content(user_id: int, username: str, lang_data: dict, context: ContextTypes.DEFAULT_TYPE) -> tuple[str, InlineKeyboardMarkup]:
-    """Builds the text and keyboard for the start menu using provided lang_data."""
-    # <<< ADDED LOGGING >>>
+    """Builds the text and INLINE keyboard for the start menu using provided lang_data."""
     logger.debug(f"_build_start_menu_content: Building menu for user {user_id} with lang_data starting with welcome: '{lang_data.get('welcome', 'N/A')}'")
 
     balance, purchases, basket_count = Decimal('0.0'), 0, 0
@@ -82,8 +80,6 @@ def _build_start_menu_content(user_id: int, username: str, lang_data: dict, cont
             balance = Decimal(str(result['balance']))
             purchases = result['total_purchases']
 
-        # Ensure basket count is up-to-date (handles expiration implicitly if needed)
-        # Note: clear_expired_basket itself is synchronous and modifies context
         clear_expired_basket(context, user_id)
         basket = context.user_data.get("basket", [])
         basket_count = len(basket)
@@ -97,7 +93,7 @@ def _build_start_menu_content(user_id: int, username: str, lang_data: dict, cont
     # Build Message Text using the PASSED lang_data
     status = get_user_status(purchases)
     balance_str = format_currency(balance)
-    welcome_template = lang_data.get("welcome", "👋 Welcome, {username}!") # Use passed lang_data
+    welcome_template = lang_data.get("welcome", "👋 Welcome, {username}!")
     status_label = lang_data.get("status_label", "Status")
     balance_label = lang_data.get("balance_label", "Balance")
     purchases_label = lang_data.get("purchases_label", "Total Purchases")
@@ -115,7 +111,7 @@ def _build_start_menu_content(user_id: int, username: str, lang_data: dict, cont
         f"{purchases_line}\n{basket_line}\n\n{shopping_prompt}\n\n⚠️ {refund_note}"
     )
 
-    # Build Keyboard using the PASSED lang_data
+    # Build INLINE Keyboard using the PASSED lang_data
     shop_button_text = lang_data.get("shop_button", "Shop")
     profile_button_text = lang_data.get("profile_button", "Profile")
     top_up_button_text = lang_data.get("top_up_button", "Top Up")
@@ -148,21 +144,70 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     username = user.username or user.first_name or f"User_{user_id}"
 
-    # Send Bot Media (Only on direct /start, not callbacks)
-    if not is_callback and BOT_MEDIA.get("type") and BOT_MEDIA.get("path"):
-        media_path = BOT_MEDIA["path"]
-        media_type = BOT_MEDIA["type"]
-        logger.info(f"Attempting to send BOT_MEDIA: type={media_type}, path={media_path}")
-        if await asyncio.to_thread(os.path.exists, media_path):
+    # --- Send Bot Media (Only on direct /start, attempt fresh read) ---
+    if not is_callback:
+        media_to_send = None
+        media_type_to_send = None
+        try:
+            if await asyncio.to_thread(os.path.exists, BOT_MEDIA_JSON_PATH):
+                # Define sync function for file read
+                def read_bot_media_sync(path):
+                    try:
+                        with open(path, 'r') as f:
+                            return json.load(f)
+                    except (FileNotFoundError, json.JSONDecodeError) as read_err:
+                         logger.error(f"Error reading/parsing {path} inside thread: {read_err}")
+                         return None # Return None on error inside the thread
+
+                # Read latest data from JSON file in thread
+                latest_bot_media = await asyncio.to_thread(read_bot_media_sync, BOT_MEDIA_JSON_PATH)
+
+                if latest_bot_media and latest_bot_media.get("type") and latest_bot_media.get("path"):
+                    media_path = latest_bot_media["path"]
+                    media_type = latest_bot_media["type"]
+                    logger.info(f"start: Read latest BOT_MEDIA from JSON: type={media_type}, path={media_path}")
+                    # Verify path again just in case
+                    if await asyncio.to_thread(os.path.exists, media_path):
+                        media_to_send = media_path
+                        media_type_to_send = media_type
+                    else:
+                        logger.warning(f"start: BOT_MEDIA path '{media_path}' from JSON not found on disk.")
+                else:
+                     logger.info(f"start: BOT_MEDIA JSON ({BOT_MEDIA_JSON_PATH}) exists but has invalid content or missing keys.")
+            else:
+                logger.info(f"start: {BOT_MEDIA_JSON_PATH} not found. No bot media to send.")
+
+        except Exception as e:
+            logger.error(f"start: Error during bot media file check/read process: {e}")
+
+        # --- Send the media if found and valid ---
+        if media_to_send and media_type_to_send:
+            logger.info(f"start: Attempting to send BOT_MEDIA read from JSON...")
             try:
-                async with asyncio.to_thread(open, media_path, "rb") as file_content:
-                    if media_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=file_content)
-                    elif media_type == "video": await context.bot.send_video(chat_id=chat_id, video=file_content)
-                    elif media_type == "gif": await context.bot.send_animation(chat_id=chat_id, animation=file_content)
-                    else: logger.warning(f"Unsupported BOT_MEDIA type: {media_type}")
-            except FileNotFoundError: logger.warning(f"BOT_MEDIA file not found at {media_path} despite initial check.")
-            except Exception as e: logger.error(f"Error sending BOT_MEDIA: {e}", exc_info=True)
-        else: logger.warning(f"BOT_MEDIA path {media_path} not found on disk.")
+                # Send media using file path - requires opening the file
+                async with asyncio.to_thread(open, media_to_send, "rb") as file_content:
+                    if media_type_to_send == "photo":
+                        await context.bot.send_photo(chat_id=chat_id, photo=file_content)
+                    elif media_type_to_send == "video":
+                        await context.bot.send_video(chat_id=chat_id, video=file_content)
+                    elif media_type_to_send == "gif":
+                        # For GIFs from path, send as Animation or Document depending on extension
+                        # Sending as Animation is generally preferred for display
+                        try:
+                            await context.bot.send_animation(chat_id=chat_id, animation=file_content)
+                        except telegram_error.BadRequest: # Fallback if send_animation fails for the format
+                             logger.warning("Failed to send GIF as animation, trying as document.")
+                             # Reset file pointer before trying again
+                             await asyncio.to_thread(file_content.seek, 0)
+                             await context.bot.send_document(chat_id=chat_id, document=file_content)
+                    else:
+                        logger.warning(f"Unsupported BOT_MEDIA type from JSON: {media_type_to_send}")
+            except FileNotFoundError:
+                logger.warning(f"start: BOT_MEDIA file '{media_to_send}' not found despite checks.")
+            except Exception as e:
+                logger.error(f"start: Error sending BOT_MEDIA from path '{media_to_send}': {e}", exc_info=True)
+    # --- End of Bot Media Sending ---
+
 
     # Ensure user exists and language context is set
     lang = context.user_data.get("lang", None)
@@ -194,27 +239,72 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         logger.info(f"start: Using existing language '{lang}' from context for user {user_id}.")
 
-    # Build and Send/Edit Menu
+    # Build menu content
     lang, lang_data = _get_lang_data(context) # Get final language data again after ensuring it's set
-    full_welcome, reply_markup = _build_start_menu_content(user_id, username, lang_data, context)
+    full_welcome, inline_reply_markup = _build_start_menu_content(user_id, username, lang_data, context)
+
+    # --- Define the standard ReplyKeyboardMarkup ---
+    reply_keyboard = [
+        # Use translated texts for the reply keyboard buttons
+        [lang_data.get("shop_button", "Shop"), lang_data.get("profile_button", "Profile")],
+        [lang_data.get("reviews_button", "Reviews"), lang_data.get("language_button", "Language")]
+        # Add more rows/buttons as needed for the ReplyKeyboard
+    ]
+    standard_reply_markup = ReplyKeyboardMarkup(
+        reply_keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False # False = Keep keyboard visible
+    )
+    # --- End of standard keyboard definition ---
 
     if is_callback:
         query = update.callback_query
         try:
-             # Only edit if message content or markup has changed
-             if query.message and (query.message.text != full_welcome or query.message.reply_markup != reply_markup):
-                  await query.edit_message_text(full_welcome, reply_markup=reply_markup, parse_mode=None)
-             elif query: await query.answer() # Acknowledge if not modified
+             # Edit the message to show the inline keyboard content
+             if query.message and (query.message.text != full_welcome or query.message.reply_markup != inline_reply_markup):
+                  await query.edit_message_text(full_welcome, reply_markup=inline_reply_markup, parse_mode=None)
+                  # Send a new message to ensure the ReplyKeyboard is displayed/updated
+                  await send_message_with_retry(
+                      context.bot,
+                      chat_id,
+                      ".", # Send a minimal message just to trigger the keyboard update
+                      reply_markup=standard_reply_markup,
+                      parse_mode=None
+                  )
+             elif query:
+                 await query.answer() # Acknowledge if not modified
+
         except telegram_error.BadRequest as e:
               if "message is not modified" not in str(e).lower():
                   logger.warning(f"Failed to edit start message (callback): {e}. Sending new.")
-                  await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=reply_markup, parse_mode=None)
+                  # Send welcome with inline keyboard
+                  await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=inline_reply_markup, parse_mode=None)
+                  # Send separate message for reply keyboard
+                  await send_message_with_retry(context.bot, chat_id, ".", reply_markup=standard_reply_markup, parse_mode=None)
               elif query: await query.answer()
         except Exception as e:
              logger.error(f"Unexpected error editing start message (callback): {e}", exc_info=True)
-             await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=reply_markup, parse_mode=None)
-    else:
-        await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=reply_markup, parse_mode=None)
+             # Attempt to send both messages as fallback
+             await send_message_with_retry(context.bot, chat_id, full_welcome, reply_markup=inline_reply_markup, parse_mode=None)
+             await send_message_with_retry(context.bot, chat_id, ".", reply_markup=standard_reply_markup, parse_mode=None)
+
+    else: # Direct /start command
+        # Send the main welcome message with the ReplyKeyboardMarkup
+        await send_message_with_retry(
+            context.bot,
+            chat_id,
+            full_welcome,
+            reply_markup=standard_reply_markup, # Use the standard keyboard here
+            parse_mode=None
+        )
+        # Send the inline keyboard in a separate message after the main one
+        await send_message_with_retry(
+            context.bot,
+            chat_id,
+            "Or use the buttons above:", # Example follow-up text
+            reply_markup=inline_reply_markup, # Send the inline keyboard
+            parse_mode=None
+         )
 
 
 # --- Other handlers ---
