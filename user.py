@@ -278,24 +278,67 @@ async def handle_city_selection(update: Update, context: ContextTypes.DEFAULT_TY
     city = CITIES.get(city_id)
     if not city: error_city_not_found = lang_data.get("error_city_not_found", "Error: City not found."); await query.edit_message_text(f"❌ {error_city_not_found}", parse_mode=None); return await handle_shop(update, context)
 
-    districts_in_city = DISTRICTS.get(city_id, {})
+    # Get districts from the global variable first
+    all_districts_in_city = DISTRICTS.get(city_id, {})
+    if not all_districts_in_city:
+        no_districts_msg = lang_data.get("no_districts_available", "No districts available yet for this city.")
+        back_cities_button = lang_data.get("back_cities_button", "Back to Cities")
+        home_button = lang_data.get("home_button", "Home")
+        keyboard = [[InlineKeyboardButton(f"{EMOJI_BACK} {back_cities_button}", callback_data="shop"), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]]
+        await query.edit_message_text(f"{EMOJI_CITY} {city}\n\n{no_districts_msg}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        return
+
+    # --- NEW: Filter districts based on product availability ---
+    available_districts = {}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        district_names_with_products = set()
+        # Find distinct district names within the city that have available products
+        c.execute("""
+            SELECT DISTINCT district FROM products
+            WHERE city = ? AND available > reserved
+        """, (city,))
+        for row in c.fetchall():
+            district_names_with_products.add(row['district'])
+
+        # Filter the original district dictionary
+        for d_id, dist_name in all_districts_in_city.items():
+            if dist_name in district_names_with_products:
+                available_districts[d_id] = dist_name
+            else:
+                 logger.debug(f"Hiding district '{dist_name}' (ID: {d_id}) in city '{city}' as it has no available products.")
+
+    except sqlite3.Error as e:
+        logger.error(f"DB error checking district product availability for city '{city}': {e}", exc_info=True)
+        # Fallback: Show all districts if DB check fails? Or show an error? Let's show all for now.
+        available_districts = all_districts_in_city
+    finally:
+        if conn: conn.close()
+    # --- END: Filter districts ---
+
+
     back_cities_button = lang_data.get("back_cities_button", "Back to Cities")
     home_button = lang_data.get("home_button", "Home")
     no_districts_msg = lang_data.get("no_districts_available", "No districts available yet for this city.")
     choose_district_prompt = lang_data.get("choose_district_prompt", "Choose a district:")
 
-    if not districts_in_city:
+    if not available_districts: # Check if the *filtered* list is empty
         keyboard = [[InlineKeyboardButton(f"{EMOJI_BACK} {back_cities_button}", callback_data="shop"), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]]
         await query.edit_message_text(f"{EMOJI_CITY} {city}\n\n{no_districts_msg}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
     else:
-        sorted_district_ids = sorted(districts_in_city.keys(), key=lambda dist_id: districts_in_city.get(dist_id, ''))
+        sorted_district_ids = sorted(available_districts.keys(), key=lambda dist_id: available_districts.get(dist_id, ''))
         keyboard = []
         for d_id in sorted_district_ids:
-            dist_name = districts_in_city.get(d_id)
+            dist_name = available_districts.get(d_id)
+            # This check might be redundant now, but keep for safety
             if dist_name: keyboard.append([InlineKeyboardButton(f"{EMOJI_DISTRICT} {dist_name}", callback_data=f"dist|{city_id}|{d_id}")])
-            else: logger.warning(f"District name missing for ID {d_id} city {city_id}")
+            else: logger.warning(f"District name missing for ID {d_id} city {city_id} after filtering")
+
         keyboard.append([InlineKeyboardButton(f"{EMOJI_BACK} {back_cities_button}", callback_data="shop"), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")])
         await query.edit_message_text(f"{EMOJI_CITY} {city}\n\n{choose_district_prompt}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
 
 async def handle_district_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     query = update.callback_query
@@ -365,6 +408,13 @@ async def handle_type_selection(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             keyboard = []
             available_label_short = lang_data.get("available_label_short", "Av")
+            msg_text_parts = [
+                f"{EMOJI_CITY} {helpers.escape_markdown(city, version=2)}\n",
+                f"{EMOJI_DISTRICT} {helpers.escape_markdown(district, version=2)}\n",
+                f"{product_emoji} {helpers.escape_markdown(p_type, version=2)}\n\n",
+                f"{helpers.escape_markdown(available_options_prompt, version=2)}"
+            ]
+
             for row in products:
                 size, price_decimal, count = row['size'], Decimal(str(row['price'])), row['count_available']
 
@@ -375,30 +425,30 @@ async def handle_type_selection(update: Update, context: ContextTypes.DEFAULT_TY
                     discounted_price = (price_decimal - discount_amount).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
                     if discounted_price < Decimal('0.01'): discounted_price = Decimal('0.01') # Prevent negative/zero prices
                     discounted_price_str = format_currency(discounted_price)
-                    # Use Markdown V2 for strikethrough (needs escaping)
-                    original_escaped = helpers.escape_markdown(format_currency(price_decimal), version=2)
-                    display_price_str = f"{helpers.escape_markdown(discounted_price_str, version=2)}€ \\(~~{original_escaped}€~~\\)"
+                    # For MarkdownV2 in button text (use escapes) - NO LONGER NEEDED IN BUTTON TEXT
+                    # original_escaped = helpers.escape_markdown(format_currency(price_decimal), version=2)
+                    # display_price_str = f"{helpers.escape_markdown(discounted_price_str, version=2)}€ \\(~~{original_escaped}€~~\\)"
+                    display_price_str_button = f"{discounted_price_str}€ ({format_currency(price_decimal)}€)" # Plain text for button
                 else:
-                    display_price_str = f"{helpers.escape_markdown(format_currency(price_decimal), version=2)}€"
+                    # display_price_str = f"{helpers.escape_markdown(format_currency(price_decimal), version=2)}€" # For message text
+                    display_price_str_button = f"{format_currency(price_decimal)}€" # Plain text for button
                 # <<< End Price Calculation >>>
 
                 price_str_callback = f"{price_decimal:.2f}" # Use original price in callback
-                # Button text should NOT use Markdown
-                button_text_price = f"{discounted_price_str}€ ({format_currency(price_decimal)}€)" if reseller_discount_percent > Decimal('0.0') else f"{format_currency(price_decimal)}€"
-                button_text = f"{product_emoji} {size} ({button_text_price}) - {available_label_short}: {count}"
+                button_text = f"{product_emoji} {size} ({display_price_str_button}) - {available_label_short}: {count}"
 
                 callback_data = f"product|{city_id}|{dist_id}|{p_type}|{size}|{price_str_callback}" # Callback uses original price
                 keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
             keyboard.append([InlineKeyboardButton(f"{EMOJI_BACK} {back_types_button}", callback_data=f"dist|{city_id}|{dist_id}"), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")])
-            # Use MarkdownV2 for the message text
+            # Send message without Markdown V2 for now to avoid button text issues
             await query.edit_message_text(
-                f"{EMOJI_CITY} {helpers.escape_markdown(city, version=2)}\n"
-                f"{EMOJI_DISTRICT} {helpers.escape_markdown(district, version=2)}\n"
-                f"{product_emoji} {helpers.escape_markdown(p_type, version=2)}\n\n"
-                f"{helpers.escape_markdown(available_options_prompt, version=2)}",
+                f"{EMOJI_CITY} {city}\n"
+                f"{EMOJI_DISTRICT} {district}\n"
+                f"{product_emoji} {p_type}\n\n"
+                f"{available_options_prompt}",
                 reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN_V2 # Set parse mode here
+                parse_mode=None # Changed back to None
             )
     except sqlite3.Error as e:
         logger.error(f"DB error fetching products {city}/{district}/{p_type}: {e}", exc_info=True)
@@ -453,17 +503,13 @@ async def handle_product_selection(update: Update, context: ContextTypes.DEFAULT
                 discounted_price = (price - discount_amount).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
                 if discounted_price < Decimal('0.01'): discounted_price = Decimal('0.01')
                 discounted_price_str = format_currency(discounted_price)
-                # Markdown for strikethrough
-                original_escaped = helpers.escape_markdown(format_currency(price), version=2)
-                price_formatted = f"{helpers.escape_markdown(discounted_price_str, version=2)}€ \\(~~{original_escaped}€~~\\)"
-            else:
-                price_formatted = f"{helpers.escape_markdown(format_currency(price), version=2)}€"
+                price_formatted = f"{discounted_price_str}€ ({format_currency(price)}€)" # Plain text display
             # <<< End Price Calculation >>>
 
-            msg = (f"{EMOJI_CITY} {helpers.escape_markdown(city, version=2)} | {EMOJI_DISTRICT} {helpers.escape_markdown(district, version=2)}\n"
-                   f"{product_emoji} {helpers.escape_markdown(p_type, version=2)} \\- {helpers.escape_markdown(size, version=2)}\n"
-                   f"{EMOJI_PRICE} {helpers.escape_markdown(price_label, version=2)}: {price_formatted}\n" # Use potentially modified price string
-                   f"{EMOJI_QUANTITY} {helpers.escape_markdown(available_label_long, version=2)}: {available_count}")
+            msg = (f"{EMOJI_CITY} {city} | {EMOJI_DISTRICT} {district}\n" # Use plain text here
+                   f"{product_emoji} {p_type} - {size}\n"
+                   f"{EMOJI_PRICE} {price_label}: {price_formatted}\n" # Use potentially modified price string
+                   f"{EMOJI_QUANTITY} {available_label_long}: {available_count}")
 
             add_callback = f"add|{city_id}|{dist_id}|{p_type}|{size}|{price_str}" # Callback uses original price string
             back_callback = f"type|{city_id}|{dist_id}|{p_type}"
@@ -471,7 +517,7 @@ async def handle_product_selection(update: Update, context: ContextTypes.DEFAULT
                 [InlineKeyboardButton(f"{basket_emoji} {add_to_basket_button}", callback_data=add_callback)],
                 [InlineKeyboardButton(f"{EMOJI_BACK} {back_options_button}", callback_data=back_callback), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]
             ]
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2) # Use MarkdownV2
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None) # Use None for parse_mode
     except sqlite3.Error as e:
         logger.error(f"DB error checking availability {city}/{district}/{p_type}/{size}: {e}", exc_info=True)
         await query.edit_message_text(f"❌ {error_loading_details}", parse_mode=None)
@@ -574,28 +620,28 @@ async def handle_add_to_basket(update: Update, context: ContextTypes.DEFAULT_TYP
                  discount_code = applied_discount_info.get('code')
                  discount_value = format_discount_value(discount_details['type'], discount_details['value'])
                  discount_amount_str = format_currency(general_discount_amount)
-                 discount_applied_str = (f"\n{EMOJI_DISCOUNT} Discount Code ({discount_code}: {discount_value}): \\-{discount_amount_str} EUR")
+                 discount_applied_str = (f"\n{EMOJI_DISCOUNT} Discount Code ({discount_code}: {discount_value}): -{discount_amount_str} EUR")
              else:
                  # General code became invalid, remove it but keep reseller discount
                  context.user_data.pop('applied_discount', None)
-                 reason_removed = lang_data.get("discount_removed_invalid_basket", "Discount removed \\(basket changed\\)\\.") # Escape for MDV2
-                 discount_applied_str = f"\n❌ Discount code '{helpers.escape_markdown(applied_discount_info['code'], version=2)}' removed \\({reason_removed}\\)\\."
+                 reason_removed = lang_data.get("discount_removed_invalid_basket", "Discount removed (basket changed).")
+                 discount_applied_str = f"\n❌ Discount code '{applied_discount_info['code']}' removed ({reason_removed})."
 
-        # --- Construct Message ---
+        # --- Construct Message (Plain Text) ---
         final_total_str = format_currency(final_total_after_general)
-        pay_msg_str = pay_msg_template.format(amount=helpers.escape_markdown(final_total_str, version=2)) # Escape amount
+        pay_msg_str = pay_msg_template.format(amount=final_total_str)
 
         item_price_str = format_currency(price) # Original price of the item just added
-        item_desc = f"{product_emoji} {helpers.escape_markdown(p_type, version=2)} {helpers.escape_markdown(size, version=2)} \\({helpers.escape_markdown(item_price_str, version=2)}€\\)"
+        item_desc = f"{product_emoji} {p_type} {size} ({item_price_str}€)"
         expiry_dt = datetime.fromtimestamp(timestamp + BASKET_TIMEOUT); expiry_time_str = expiry_dt.strftime('%H:%M:%S')
-        reserved_msg = (added_msg_template.format(timeout=timeout_minutes, item=item_desc) + "\n\n" + f"⏳ {helpers.escape_markdown(expires_label, version=2)}: {helpers.escape_markdown(expiry_time_str, version=2)}\n")
+        reserved_msg = (added_msg_template.format(timeout=timeout_minutes, item=item_desc) + "\n\n" + f"⏳ {expires_label}: {expiry_time_str}\n")
 
         # Add breakdown
-        reserved_msg += f"\nSubtotal: {helpers.escape_markdown(format_currency(original_total), version=2)} EUR"
+        reserved_msg += f"\nSubtotal: {format_currency(original_total)} EUR"
         if total_reseller_discount > Decimal('0.0'):
-            reserved_msg += f"\n🤝 Reseller Discount: \\-{helpers.escape_markdown(format_currency(total_reseller_discount), version=2)} EUR"
+            reserved_msg += f"\n🤝 Reseller Discount: -{format_currency(total_reseller_discount)} EUR"
         if discount_applied_str:
-            reserved_msg += discount_applied_str # Already escaped if needed
+            reserved_msg += discount_applied_str # Already plain text
         reserved_msg += f"\n\n{pay_msg_str}" # Final total line
 
         district_btn_text = district[:15]
@@ -607,7 +653,7 @@ async def handle_add_to_basket(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton(f"➕ {shop_more_button_text} ({district_btn_text})", callback_data=f"dist|{city_id}|{dist_id}")],
             [InlineKeyboardButton(f"{EMOJI_BACK} {back_options_button}", callback_data=f"type|{city_id}|{dist_id}|{p_type}"), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]
         ]
-        await query.edit_message_text(reserved_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2) # Use MarkdownV2
+        await query.edit_message_text(reserved_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None) # Send as plain text
 
     except sqlite3.Error as e:
         if conn and conn.in_transaction: conn.rollback()
@@ -791,7 +837,7 @@ async def handle_view_basket(update: Update, context: ContextTypes.DEFAULT_TYPE,
             # <<< Calculate Reseller Discount for this item >>>
             item_discount_percent = get_reseller_discount(user_id, product_type_name)
             item_original_price_str = format_currency(price)
-            item_display_price_str = f"{item_original_price_str}€"
+            item_display_price_str = f"{item_original_price_str}€" # Plain text default
             item_final_price = price # Start with original price
 
             if item_discount_percent > Decimal('0.0'):
@@ -800,12 +846,8 @@ async def handle_view_basket(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 if discounted_price < Decimal('0.01'): discounted_price = Decimal('0.01')
                 item_final_price = discounted_price # Update the price for final total calc
                 total_reseller_discount += item_discount_amount # Accumulate discount
-                # Use Markdown for strikethrough display
-                discounted_esc = helpers.escape_markdown(format_currency(discounted_price), version=2)
-                original_esc = helpers.escape_markdown(item_original_price_str, version=2)
-                item_display_price_str = f"{discounted_esc}€ \\(~~{original_esc}€~~\\)"
-            else: # No reseller discount, just escape the normal price
-                item_display_price_str = f"{helpers.escape_markdown(item_original_price_str, version=2)}€"
+                # Plain text display for strikethrough
+                item_display_price_str = f"{format_currency(discounted_price)}€ ({item_original_price_str}€)"
             # <<< End Reseller Discount Calc >>>
 
             final_total += item_final_price # Accumulate final price for this item
@@ -814,12 +856,9 @@ async def handle_view_basket(update: Update, context: ContextTypes.DEFAULT_TYPE,
             timestamp = item['timestamp']
             remaining_time = max(0, int(BASKET_TIMEOUT - (time.time() - timestamp)))
             time_str = f"{remaining_time // 60} min {remaining_time % 60} sec"
-            # Escape item description parts for Markdown
-            escaped_item_desc = f"{product_emoji} {helpers.escape_markdown(product_type_name, version=2)} {helpers.escape_markdown(details['size'], version=2)}"
-            escaped_time_str = helpers.escape_markdown(time_str, version=2)
-            escaped_expires_label = helpers.escape_markdown(expires_in_label, version=2)
-            msg += (f"{items_to_display_count + 1}\\. {escaped_item_desc} \\({item_display_price_str}\\)\n" # Use display price string
-                   f"   ⏳ {escaped_expires_label}: {escaped_time_str}\n")
+            # Construct message line (plain text)
+            msg += (f"{items_to_display_count + 1}. {item_desc} ({item_display_price_str})\n"
+                   f"   ⏳ {expires_in_label}: {time_str}\n")
 
             # Button text remains plain
             remove_button_text = f"🗑️ {remove_button_label} {product_type_name} {details['size']}"[:60]
@@ -848,30 +887,26 @@ async def handle_view_basket(update: Update, context: ContextTypes.DEFAULT_TYPE,
             if code_valid and discount_details:
                 general_discount_amount = Decimal(str(discount_details['discount_amount']))
                 final_total_after_general = Decimal(str(discount_details['final_total']))
-                discount_code = helpers.escape_markdown(discount_code_to_revalidate, version=2)
-                discount_value = helpers.escape_markdown(format_discount_value(discount_details['type'], discount_details['value']), version=2)
-                discount_amount_str = helpers.escape_markdown(format_currency(general_discount_amount), version=2)
-                discount_applied_str = (f"\n{EMOJI_DISCOUNT} {helpers.escape_markdown(discount_applied_label, version=2)} \\({discount_code}: {discount_value}\\): \\-{discount_amount_str} EUR")
+                discount_code = discount_code_to_revalidate
+                discount_value = format_discount_value(discount_details['type'], discount_details['value'])
+                discount_amount_str = format_currency(general_discount_amount)
+                discount_applied_str = (f"\n{EMOJI_DISCOUNT} {discount_applied_label} ({discount_code}: {discount_value}): -{discount_amount_str} EUR")
                 # Update context
                 context.user_data['applied_discount'] = {'code': discount_code_to_revalidate, 'amount': float(general_discount_amount), 'final_total': float(final_total_after_general)}
             else:
                 context.user_data.pop('applied_discount', None); logger.info(f"Discount '{discount_code_to_revalidate}' invalid user {user_id} basket view. Reason: {validation_message}")
-                # Escape reason message for Markdown
-                reason_esc = helpers.escape_markdown(validation_message, version=2)
-                code_esc = helpers.escape_markdown(discount_code_to_revalidate, version=2)
-                discount_removed_template_esc = helpers.escape_markdown(discount_removed_note_template, version=2).format(code=code_esc, reason=reason_esc)
-                discount_applied_str = f"\n{discount_removed_template_esc}"
+                discount_applied_str = f"\n❌ {discount_removed_note_template.format(code=discount_code_to_revalidate, reason=validation_message)}"
 
         # --- Final Message Construction ---
         subtotal_label = lang_data.get("subtotal_label", "Subtotal"); total_label = lang_data.get("total_label", "Total")
         original_total_str = format_currency(original_total); final_total_str = format_currency(final_total_after_general) # Use the absolute final total
 
-        msg += f"\n{helpers.escape_markdown(subtotal_label, version=2)}: {helpers.escape_markdown(original_total_str, version=2)} EUR"
+        msg += f"\n{subtotal_label}: {original_total_str} EUR"
         if total_reseller_discount > Decimal('0.0'):
-            msg += f"\n🤝 Reseller Discount: \\-{helpers.escape_markdown(format_currency(total_reseller_discount), version=2)} EUR"
+            msg += f"\n🤝 Reseller Discount: -{format_currency(total_reseller_discount)} EUR"
         if discount_applied_str: # General discount code applied/removed message
             msg += discount_applied_str
-        msg += f"\n💳 {helpers.escape_markdown(total_label, version=2)}: {helpers.escape_markdown(final_total_str, version=2)} EUR" # Show the absolute final total
+        msg += f"\n💳 {total_label}: {final_total_str} EUR" # Show the absolute final total
 
         # --- Buttons ---
         pay_now_button_text = lang_data.get("pay_now_button", "Pay Now"); clear_all_button_text = lang_data.get("clear_all_button", "Clear All")
@@ -886,7 +921,7 @@ async def handle_view_basket(update: Update, context: ContextTypes.DEFAULT_TYPE,
         ]
         final_keyboard = keyboard_items + action_buttons
 
-        try: await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(final_keyboard), parse_mode=ParseMode.MARKDOWN_V2) # Use MarkdownV2
+        try: await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(final_keyboard), parse_mode=None) # Send as plain text
         except telegram_error.BadRequest as e:
              if "message is not modified" not in str(e).lower(): logger.error(f"Error editing basket view message: {e}")
              else: await query.answer()
@@ -1534,3 +1569,149 @@ async def handle_refill_amount_message(update: Update, context: ContextTypes.DEF
         await send_message_with_retry(context.bot, chat_id, f"❌ {unexpected_error_msg}", parse_mode=None)
         context.user_data.pop('state', None)
         context.user_data.pop('refill_eur_amount', None)
+
+
+# --- Confirm Pay Handler (Recalculates total securely) ---
+async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Handles the 'Pay Now' button press from the basket."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
+    lang = context.user_data.get("lang", "en")
+    lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
+
+    clear_expired_basket(context, user_id) # Sync call
+    basket = context.user_data.get("basket", [])
+    applied_discount_info = context.user_data.get('applied_discount')
+
+    if not basket:
+        await query.answer("Your basket is empty!", show_alert=True)
+        await handle_view_basket(update, context) # Refresh view
+        return
+
+    # --- Secure Recalculation ---
+    conn = None
+    original_total = Decimal('0.0')
+    final_total = Decimal('0.0') # Will include reseller discount
+    total_reseller_discount = Decimal('0.0')
+    valid_basket_items_snapshot = []
+    discount_code_to_use = None
+    user_balance = Decimal('0.0')
+    error_occurred = False
+
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+
+        product_ids_in_basket = list(set(item['product_id'] for item in basket))
+        if not product_ids_in_basket:
+             await query.answer("Basket empty after validation.", show_alert=True)
+             await handle_view_basket(update, context)
+             error_occurred = True
+             raise StopIteration("Basket empty after validation")
+
+        placeholders = ','.join('?' for _ in product_ids_in_basket)
+        # Fetch price and type for recalculation
+        c.execute(f"SELECT id, price, product_type FROM products WHERE id IN ({placeholders})", product_ids_in_basket)
+        prices_and_types = {row['id']: {'price': Decimal(str(row['price'])), 'type': row['product_type']} for row in c.fetchall()}
+
+        # Recalculate totals based on current DB prices and reseller rules
+        for item in basket:
+             prod_id = item['product_id']
+             if prod_id in prices_and_types:
+                 item_data = prices_and_types[prod_id]
+                 item_price = item_data['price'] # Current price from DB
+                 item_type = item_data['type']
+                 original_total += item_price
+
+                 # Calculate reseller discount for this item
+                 item_discount_percent = get_reseller_discount(user_id, item_type)
+                 item_discount_amount = (item_price * item_discount_percent / Decimal('100.0')).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                 item_final_price = (item_price - item_discount_amount).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                 if item_final_price < Decimal('0.01'): item_final_price = Decimal('0.01')
+                 final_total += item_final_price # Accumulate final price
+                 total_reseller_discount += item_discount_amount # Accumulate discount
+
+                 # Create snapshot item (use original price for process_purchase logic if needed)
+                 item_snapshot = item.copy()
+                 item_snapshot['price_at_checkout'] = item_price # Store price used for calc
+                 valid_basket_items_snapshot.append(item_snapshot)
+             else: logger.warning(f"Product {prod_id} missing during payment confirm recalc user {user_id}.")
+
+        if not valid_basket_items_snapshot:
+             context.user_data['basket'] = []
+             context.user_data.pop('applied_discount', None)
+             logger.warning(f"All items unavailable user {user_id} payment confirm.")
+             kb = [[InlineKeyboardButton("⬅️ Back", callback_data="view_basket")]]
+             await query.edit_message_text("❌ Error: All items unavailable.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=None)
+             error_occurred = True
+             raise StopIteration("All items unavailable")
+
+        # Apply General Discount (if any) to the reseller-discounted total
+        if applied_discount_info:
+            code_valid, _, discount_details = validate_discount_code(applied_discount_info['code'], float(final_total))
+            if code_valid and discount_details:
+                final_total = Decimal(str(discount_details['final_total'])) # Apply general discount
+                discount_code_to_use = applied_discount_info.get('code')
+            else:
+                # General code invalid, but keep reseller discount calculated above
+                context.user_data.pop('applied_discount', None)
+                await query.answer("Applied discount code became invalid.", show_alert=True)
+
+        if final_total < Decimal('0.0'):
+             await query.answer("Cannot process negative amount.", show_alert=True)
+             error_occurred = True
+             raise StopIteration("Negative amount")
+
+        # Fetch User Balance
+        c.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        balance_result = c.fetchone()
+        user_balance = Decimal(str(balance_result['balance'])) if balance_result else Decimal('0.0')
+
+    except StopIteration as stop_e:
+         logger.info(f"Stopping handle_confirm_pay early: {stop_e}")
+         error_occurred = True # Already handled
+    except (sqlite3.Error, Exception) as e:
+        logger.error(f"Error during payment confirm data processing user {user_id}: {e}", exc_info=True)
+        error_occurred = True
+        kb = [[InlineKeyboardButton("⬅️ Back", callback_data="view_basket")]]
+        try: await query.edit_message_text("❌ Error preparing payment.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=None)
+        except Exception as edit_err: logger.error(f"Failed to edit message in error handler: {edit_err}")
+    finally:
+        if conn: conn.close(); logger.debug("DB connection closed in handle_confirm_pay.")
+
+    # --- Proceed only if no error occurred during data processing ---
+    if error_occurred: return
+
+    # --- Balance Comparison and Action Logic ---
+    logger.info(f"Payment confirm user {user_id}. Final Total (after all discounts): {final_total:.2f}, Balance: {user_balance:.2f}")
+
+    if user_balance >= final_total:
+        # Pay with balance - use final_total
+        logger.info(f"Sufficient balance user {user_id}. Processing with balance.")
+        try:
+            if query.message: await query.edit_message_text("⏳ Processing payment with balance...", reply_markup=None, parse_mode=None)
+            else: await send_message_with_retry(context.bot, chat_id, "⏳ Processing payment with balance...", parse_mode=None)
+        except telegram_error.BadRequest: await query.answer("Processing...")
+
+        # Pass the FINAL calculated total to process purchase
+        success = await process_purchase_with_balance(user_id, final_total, valid_basket_items_snapshot, discount_code_to_use, context)
+
+        if not success: # Refresh basket view only on failure
+            await handle_view_basket(update, context) # Use await
+
+    else:
+        # Insufficient balance - Prompt to Refill
+        logger.info(f"Insufficient balance user {user_id}.")
+        needed_amount_str = format_currency(final_total)
+        balance_str = format_currency(user_balance)
+        insufficient_msg = lang_data.get("insufficient_balance", "⚠️ Insufficient Balance! Top up needed.")
+        top_up_button_text = lang_data.get("top_up_button", "Top Up")
+        back_basket_button_text = lang_data.get("back_basket_button", "Back to Basket")
+        full_msg = (f"{insufficient_msg}\n\nRequired: {needed_amount_str} EUR\nYour Balance: {balance_str} EUR")
+        keyboard = [
+            [InlineKeyboardButton(f"💸 {top_up_button_text}", callback_data="refill")],
+            [InlineKeyboardButton(f"⬅️ {back_basket_button_text}", callback_data="view_basket")]
+        ]
+        try: await query.edit_message_text(full_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        except telegram_error.BadRequest: await send_message_with_retry(context.bot, chat_id, full_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
