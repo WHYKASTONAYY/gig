@@ -9,12 +9,9 @@ from functools import wraps
 from datetime import timedelta
 import threading # Added for Flask thread
 import json # Added for webhook processing
-from decimal import Decimal, ROUND_DOWN, ROUND_UP # <-- MODIFIED: Import ROUND_DOWN and ROUND_UP
-# *** ADD THESE IMPORTS for webhook verification ***
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import hmac
 import hashlib
-# ***********************************************
-
 
 # --- Telegram Imports ---
 from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -24,26 +21,20 @@ from telegram.ext import (
     PicklePersistence, JobQueue
 )
 from telegram.constants import ParseMode
-# *** FIXED: Import specific error classes ***
 from telegram.error import Forbidden, BadRequest, NetworkError, RetryAfter, TelegramError
 
 # --- Flask Imports ---
-from flask import Flask, request, Response # Added for webhook server
-import nest_asyncio # Added to allow nested asyncio loops
+from flask import Flask, request, Response
+import nest_asyncio
 
 # --- Local Imports ---
-# Import variables/functions that were modified or needed
 from utils import (
     TOKEN, ADMIN_ID, init_db, load_all_data, LANGUAGES, THEMES,
     SUPPORT_USERNAME, BASKET_TIMEOUT, clear_all_expired_baskets,
-    SECONDARY_ADMIN_IDS, WEBHOOK_URL, # Added WEBHOOK_URL
-    # *** ADD NOWPAYMENTS_IPN_SECRET import ***
-    NOWPAYMENTS_IPN_SECRET,
-    # *************************************
-    get_db_connection, # Import the DB connection helper
-    DATABASE_PATH, # Import DB path if needed for direct error checks (optional)
-    get_pending_deposit, remove_pending_deposit, FEE_ADJUSTMENT, # Import deposit/price utils ## REMOVED get_currency_to_eur_price ##
-    send_message_with_retry # Import send_message_with_retry
+    SECONDARY_ADMIN_IDS, WEBHOOK_URL, NOWPAYMENTS_IPN_SECRET,
+    get_db_connection, DATABASE_PATH,
+    get_pending_deposit, remove_pending_deposit, FEE_ADJUSTMENT,
+    send_message_with_retry
 )
 from user import (
     start, handle_shop, handle_city_selection, handle_district_selection,
@@ -66,23 +57,21 @@ from admin import (
     handle_adm_remove_district, handle_adm_manage_products, handle_adm_manage_products_city,
     handle_adm_manage_products_dist, handle_adm_manage_products_type, handle_adm_delete_prod,
     handle_adm_manage_types, handle_adm_add_type, handle_adm_delete_type,
-    handle_adm_edit_type_menu, handle_adm_change_type_emoji, # <-- Import new type edit handlers
+    handle_adm_edit_type_menu, handle_adm_change_type_emoji,
     handle_adm_manage_discounts, handle_adm_toggle_discount, handle_adm_delete_discount,
     handle_adm_add_discount_start, handle_adm_use_generated_code, handle_adm_set_discount_type,
     handle_adm_set_media,
     handle_adm_broadcast_start, handle_cancel_broadcast,
     handle_confirm_broadcast, handle_adm_broadcast_message,
-    # --- Broadcast Handlers ---
     handle_adm_broadcast_target_type, handle_adm_broadcast_target_city, handle_adm_broadcast_target_status,
-    handle_adm_broadcast_inactive_days_message, # Message handler
-    # ----------------------------
+    handle_adm_broadcast_inactive_days_message,
     handle_confirm_yes,
     handle_adm_add_city_message,
     handle_adm_add_district_message, handle_adm_edit_district_message,
     handle_adm_edit_city_message, handle_adm_custom_size_message, handle_adm_price_message,
     handle_adm_drop_details_message, handle_adm_bot_media_message, handle_adm_add_type_message,
-    handle_adm_add_type_emoji_message, # <-- Import new type emoji handler
-    handle_adm_edit_type_emoji_message, # <-- Import new type emoji edit handler
+    handle_adm_add_type_emoji_message,
+    handle_adm_edit_type_emoji_message,
     process_discount_code_input, handle_adm_discount_code_message, handle_adm_discount_value_message,
     handle_adm_manage_reviews, handle_adm_delete_review_confirm
 )
@@ -90,34 +79,32 @@ from viewer_admin import (
     handle_viewer_admin_menu,
     handle_viewer_added_products,
     handle_viewer_view_product_media,
-    # --- User Management Handlers (Imported from viewer_admin.py) ---
     handle_manage_users_start,
     handle_view_user_profile,
     handle_adjust_balance_start,
     handle_toggle_ban_user,
-    handle_adjust_balance_amount_message, # Message handler
-    handle_adjust_balance_reason_message # Message handler
-    # ---------------------------------------------------------------
+    handle_adjust_balance_amount_message,
+    handle_adjust_balance_reason_message
 )
 # --- Import Reseller Management handlers ---
 try:
     from reseller_management import (
-        handle_manage_resellers_menu,
-        handle_reseller_toggle_status,
-        handle_manage_reseller_discounts_select_reseller,
-        handle_manage_specific_reseller_discounts,
-        handle_reseller_add_discount_select_type,
-        handle_reseller_add_discount_enter_percent,
-        handle_reseller_edit_discount,
-        handle_reseller_delete_discount_confirm,
-        handle_reseller_percent_message # Message handler
+        handle_manage_resellers_menu,         # Callback handler (now prompts for ID)
+        handle_reseller_manage_id_message,    # <<< Message handler for ID input
+        handle_reseller_toggle_status,        # Callback handler
+        handle_manage_reseller_discounts_select_reseller, # Callback handler
+        handle_manage_specific_reseller_discounts,        # Callback handler
+        handle_reseller_add_discount_select_type,        # Callback handler
+        handle_reseller_add_discount_enter_percent,      # Callback handler
+        handle_reseller_edit_discount,                   # Callback handler
+        handle_reseller_delete_discount_confirm,         # Callback handler
+        handle_reseller_percent_message         # Message handler
     )
 except ImportError:
-    # Create logger instance before using it
     logger_dummy_reseller = logging.getLogger(__name__ + "_dummy_reseller")
     logger_dummy_reseller.error("Could not import handlers from reseller_management.py.")
-    # Add dummy handlers if needed for fallback
     async def handle_manage_resellers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None): await update.callback_query.answer("Handler missing.", show_alert=True)
+    async def handle_reseller_manage_id_message(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Dummy message handler
     async def handle_reseller_toggle_status(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None): await update.callback_query.answer("Handler missing.", show_alert=True)
     async def handle_manage_reseller_discounts_select_reseller(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None): await update.callback_query.answer("Handler missing.", show_alert=True)
     async def handle_manage_specific_reseller_discounts(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None): await update.callback_query.answer("Handler missing.", show_alert=True)
@@ -125,11 +112,10 @@ except ImportError:
     async def handle_reseller_add_discount_enter_percent(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None): await update.callback_query.answer("Handler missing.", show_alert=True)
     async def handle_reseller_edit_discount(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None): await update.callback_query.answer("Handler missing.", show_alert=True)
     async def handle_reseller_delete_discount_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None): await update.callback_query.answer("Handler missing.", show_alert=True)
-    async def handle_reseller_percent_message(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Message handler dummy
+    async def handle_reseller_percent_message(update: Update, context: ContextTypes.DEFAULT_TYPE): pass
 # --- END Import Reseller Management handlers ---
 
-# Import payment module for processing refill
-import payment # Changed from specific imports to module import
+import payment
 from stock import handle_view_stock
 
 # --- Logging Setup ---
@@ -140,18 +126,17 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger('apscheduler.scheduler').setLevel(logging.WARNING)
 logging.getLogger('apscheduler.executors.default').setLevel(logging.WARNING)
-logging.getLogger('werkzeug').setLevel(logging.WARNING) # Silence Flask's default logger
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Apply nest_asyncio to allow running Flask within the bot's async loop
 nest_asyncio.apply()
 
-# --- Globals for Flask & Telegram App ---
+# --- Globals ---
 flask_app = Flask(__name__)
-telegram_app: Application | None = None # Initialize as None
-main_loop = None # Store the main event loop
+telegram_app: Application | None = None
+main_loop = None
 
-# --- Callback Data Parsing Decorator ---
+# --- Callback Router ---
 def callback_query_router(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -162,7 +147,6 @@ def callback_query_router(func):
             params = parts[1:]
             target_func_name = f"handle_{command}"
 
-            # Map command strings to the actual function objects
             KNOWN_HANDLERS = {
                 # User Handlers
                 "start": start, "back_start": handle_back_start, "shop": handle_shop,
@@ -177,9 +161,9 @@ def callback_query_router(func):
                 "refill": handle_refill,
                 "view_history": handle_view_history,
                 "apply_discount_start": apply_discount_start, "remove_discount": remove_discount,
-                # Payment Handlers (NOWPayments)
-                "confirm_pay": payment.handle_confirm_pay, # Payment via balance
-                "select_refill_crypto": payment.handle_select_refill_crypto, # Crypto selection triggers NOWPayments
+                # Payment Handlers
+                "confirm_pay": payment.handle_confirm_pay,
+                "select_refill_crypto": payment.handle_select_refill_crypto,
                 # Primary Admin Handlers
                 "admin_menu": handle_admin_menu,
                 "sales_analytics_menu": handle_sales_analytics_menu, "sales_dashboard": handle_sales_dashboard,
@@ -206,24 +190,24 @@ def callback_query_router(func):
                 "adm_use_generated_code": handle_adm_use_generated_code, "adm_set_discount_type": handle_adm_set_discount_type,
                 "adm_set_media": handle_adm_set_media,
                 "confirm_yes": handle_confirm_yes,
-                # --- Broadcast Handlers ---
+                # Broadcast Callbacks
                 "adm_broadcast_start": handle_adm_broadcast_start,
                 "adm_broadcast_target_type": handle_adm_broadcast_target_type,
                 "adm_broadcast_target_city": handle_adm_broadcast_target_city,
                 "adm_broadcast_target_status": handle_adm_broadcast_target_status,
                 "cancel_broadcast": handle_cancel_broadcast,
                 "confirm_broadcast": handle_confirm_broadcast,
-                # --------------------------
+                # Review Callbacks
                 "adm_manage_reviews": handle_adm_manage_reviews,
                 "adm_delete_review_confirm": handle_adm_delete_review_confirm,
-                # --- User Management Callbacks ---
-                "adm_manage_users": handle_manage_users_start, # Entry point (pagination)
-                "adm_view_user": handle_view_user_profile, # View specific user
-                "adm_adjust_balance_start": handle_adjust_balance_start, # Start balance adj.
-                "adm_toggle_ban": handle_toggle_ban_user, # Ban/unban user
+                # User Management Callbacks
+                "adm_manage_users": handle_manage_users_start,
+                "adm_view_user": handle_view_user_profile,
+                "adm_adjust_balance_start": handle_adjust_balance_start,
+                "adm_toggle_ban": handle_toggle_ban_user,
                 # --- Reseller Management Callbacks ---
-                "manage_resellers_menu": handle_manage_resellers_menu,
-                "reseller_toggle_status": handle_reseller_toggle_status,
+                "manage_resellers_menu": handle_manage_resellers_menu, # Entry point now asks for ID
+                "reseller_toggle_status": handle_reseller_toggle_status, # Triggered after ID entry/display
                 "manage_reseller_discounts_select_reseller": handle_manage_reseller_discounts_select_reseller,
                 "reseller_manage_specific": handle_manage_specific_reseller_discounts,
                 "reseller_add_discount_select_type": handle_reseller_add_discount_select_type,
@@ -257,16 +241,16 @@ def callback_query_router(func):
 
 @callback_query_router
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This function is now primarily a dispatcher via the decorator.
-    pass # Decorator handles everything
+    pass
 
-# --- Central Message Handler (for states) ---
+# --- Central Message Handler ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles regular messages based on user state."""
     if not update.message or not update.effective_user: return
 
     user_id = update.effective_user.id
-    state = context.user_data.get('state')
+    user_data = context.application.user_data.get(user_id, context.user_data)
+    state = user_data.get('state')
     logger.debug(f"Message received from user {user_id}, state: {state}")
 
     STATE_HANDLERS = {
@@ -284,29 +268,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'awaiting_price': handle_adm_price_message,
         'awaiting_drop_details': handle_adm_drop_details_message,
         'awaiting_bot_media': handle_adm_bot_media_message,
-        # --- Broadcast Handlers ---
+        # Broadcast Message Handlers
         'awaiting_broadcast_inactive_days': handle_adm_broadcast_inactive_days_message,
         'awaiting_broadcast_message': handle_adm_broadcast_message,
-        # --------------------------
+        # General Discount Message Handlers
         'awaiting_discount_code': handle_adm_discount_code_message,
         'awaiting_discount_value': handle_adm_discount_value_message,
-        # --- Refill ---
+        # Refill Message Handlers
         'awaiting_refill_amount': handle_refill_amount_message,
-        'awaiting_refill_crypto_choice': None, # Handled by callback
-        # --- User Management States ---
+        # User Management Message Handlers
         'awaiting_balance_adjustment_amount': handle_adjust_balance_amount_message,
         'awaiting_balance_adjustment_reason': handle_adjust_balance_reason_message,
-        # --- Reseller Management States ---
+        # --- Reseller Management Message Handlers ---
+        'awaiting_reseller_manage_id': handle_reseller_manage_id_message, # <<< ADDED THIS LINE
         'awaiting_reseller_discount_percent': handle_reseller_percent_message,
-        # ----------------------------
+        # ------------------------------------------
     }
 
     handler_func = STATE_HANDLERS.get(state)
     if handler_func:
         await handler_func(update, context)
     else:
-        # Check if user is banned before processing other messages
-        if state is None: # Only check if not in a specific state
+        # Check if user is banned only if not in a specific state flow
+        if state is None:
             conn = None
             is_banned = False
             try:
@@ -323,7 +307,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if is_banned:
                 logger.info(f"Ignoring message from banned user {user_id}.")
-                return # Don't process commands/messages from banned users
+                return
 
         logger.debug(f"Ignoring message from user {user_id} in state: {state}")
 
@@ -333,13 +317,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
     logger.error(f"Caught error type: {type(context.error)}")
     chat_id = None
-    user_id = None # Added to potentially identify user in logs
+    user_id = None
 
     if isinstance(update, Update):
-        if update.effective_chat:
-            chat_id = update.effective_chat.id
-        if update.effective_user:
-            user_id = update.effective_user.id
+        if update.effective_chat: chat_id = update.effective_chat.id
+        if update.effective_user: user_id = update.effective_user.id
 
     logger.debug(f"Error context: user_data={context.user_data}, chat_data={context.chat_data}")
 
@@ -348,56 +330,26 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         if isinstance(context.error, BadRequest):
             if "message is not modified" in str(context.error).lower():
                 logger.debug(f"Ignoring 'message is not modified' error for chat {chat_id}.")
-                return # Don't notify user for this specific error
+                return
             logger.warning(f"Telegram API BadRequest for chat {chat_id} (User: {user_id}): {context.error}")
-            if "can't parse entities" in str(context.error).lower():
-                error_message = "An error occurred displaying the message due to formatting. Please try again."
-            else:
-                 error_message = "An error occurred communicating with Telegram. Please try again."
-        elif isinstance(context.error, NetworkError):
-            logger.warning(f"Telegram API NetworkError for chat {chat_id} (User: {user_id}): {context.error}")
-            error_message = "A network error occurred. Please check your connection and try again."
-        elif isinstance(context.error, Forbidden):
-             logger.warning(f"Forbidden error for chat {chat_id} (User: {user_id}): Bot possibly blocked or kicked.")
-             return # Don't try to send a message if blocked
-        elif isinstance(context.error, RetryAfter):
-             retry_seconds = context.error.retry_after + 1
-             logger.warning(f"Rate limit hit during update processing for chat {chat_id}. Error: {context.error}")
-             return # Don't send a message back for rate limit errors in handler
-        elif isinstance(context.error, sqlite3.Error):
-            logger.error(f"Database error during update handling for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
-            # Don't expose detailed DB errors to the user
-        elif isinstance(context.error, NameError):
-             logger.error(f"NameError encountered for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
-             if 'clear_expired_basket' in str(context.error):
-                 logger.error("Error likely due to missing import in payment.py.")
-                 error_message = "An internal processing error occurred (payment). Please try again."
-             else:
-                 error_message = "An internal processing error occurred. Please try again or contact support if it persists."
-        elif isinstance(context.error, AttributeError): # Catch the specific AttributeError
-             logger.error(f"AttributeError encountered for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
-             if "'NoneType' object has no attribute 'get'" in str(context.error) and "_process_collected_media" in str(context.error.__traceback__):
-                 logger.error("Error likely due to missing user_data in job context.")
-                 error_message = "An internal processing error occurred (media group). Please try again."
-             else:
-                 error_message = "An unexpected internal error occurred. Please contact support."
-        else:
-             logger.exception(f"An unexpected error occurred during update handling for chat {chat_id} (User: {user_id}).")
-             error_message = "An unexpected error occurred. Please contact support."
+            if "can't parse entities" in str(context.error).lower(): error_message = "An error occurred displaying the message due to formatting. Please try again."
+            else: error_message = "An error occurred communicating with Telegram. Please try again."
+        elif isinstance(context.error, NetworkError): error_message = "A network error occurred. Please check your connection and try again."
+        elif isinstance(context.error, Forbidden): logger.warning(f"Forbidden error for chat {chat_id} (User: {user_id}): Bot possibly blocked or kicked."); return
+        elif isinstance(context.error, RetryAfter): logger.warning(f"Rate limit hit during update processing for chat {chat_id}. Error: {context.error}"); return
+        elif isinstance(context.error, sqlite3.Error): logger.error(f"Database error during update handling for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True)
+        elif isinstance(context.error, NameError): logger.error(f"NameError encountered for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True); error_message = "An internal processing error occurred. Please try again or contact support if it persists."
+        elif isinstance(context.error, AttributeError): logger.error(f"AttributeError encountered for chat {chat_id} (User: {user_id}): {context.error}", exc_info=True); error_message = "An unexpected internal error occurred. Please contact support."
+        else: logger.exception(f"An unexpected error occurred during update handling for chat {chat_id} (User: {user_id})."); error_message = "An unexpected error occurred. Please contact support."
 
-        # Attempt to send error message to the user
         try:
             bot_instance = context.bot if hasattr(context, 'bot') else (telegram_app.bot if telegram_app else None)
-            if bot_instance:
-                 await send_message_with_retry(bot_instance, chat_id, error_message, parse_mode=None)
-            else:
-                 logger.error("Could not get bot instance to send error message.")
-        except Exception as e:
-            logger.error(f"Failed to send error message to user {chat_id}: {e}")
+            if bot_instance: await send_message_with_retry(bot_instance, chat_id, error_message, parse_mode=None)
+            else: logger.error("Could not get bot instance to send error message.")
+        except Exception as e: logger.error(f"Failed to send error message to user {chat_id}: {e}")
 
 # --- Bot Setup Functions ---
 async def post_init(application: Application) -> None:
-    """Post-initialization tasks, e.g., setting commands."""
     logger.info("Running post_init setup...")
     logger.info("Setting bot commands...")
     await application.bot.set_my_commands([
@@ -407,13 +359,11 @@ async def post_init(application: Application) -> None:
     logger.info("Post_init finished.")
 
 async def post_shutdown(application: Application) -> None:
-    """Tasks to run on graceful shutdown."""
     logger.info("Running post_shutdown cleanup...")
     logger.info("Post_shutdown finished.")
 
 # Background Job Wrapper for Basket Clearing
 async def clear_expired_baskets_job_wrapper(context: ContextTypes.DEFAULT_TYPE):
-    """Wrapper to call the synchronous clear_all_expired_baskets."""
     logger.debug("Running background job: clear_expired_baskets_job")
     try:
         await asyncio.to_thread(clear_all_expired_baskets)
@@ -423,22 +373,14 @@ async def clear_expired_baskets_job_wrapper(context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Flask Webhook Routes ---
-
 def verify_nowpayments_signature(request_data, signature_header, secret_key):
-    """Verifies the signature provided by NOWPayments."""
     if not secret_key or not signature_header:
         logger.warning("IPN Secret Key or signature header missing. Cannot verify webhook.")
-        return False # Safer to fail verification if secret is missing
-
+        return False
     try:
-        raw_body = request.get_data() # Get raw bytes
+        raw_body = request.get_data()
         ordered_data = json.dumps(json.loads(raw_body), sort_keys=True)
-        hmac_hash = hmac.new(
-            secret_key.encode('utf-8'),
-            ordered_data.encode('utf-8'),
-            hashlib.sha512
-        ).hexdigest()
-
+        hmac_hash = hmac.new(secret_key.encode('utf-8'), ordered_data.encode('utf-8'), hashlib.sha512).hexdigest()
         logger.debug(f"Calculated HMAC: {hmac_hash}")
         logger.debug(f"Received Signature: {signature_header}")
         return hmac.compare_digest(hmac_hash, signature_header)
@@ -446,275 +388,139 @@ def verify_nowpayments_signature(request_data, signature_header, secret_key):
         logger.error(f"Error during signature verification: {e}", exc_info=True)
         return False
 
-
 @flask_app.route("/webhook", methods=['POST'])
 def nowpayments_webhook():
-    """Handles Instant Payment Notifications (IPN) from NOWPayments."""
-    global telegram_app, main_loop, NOWPAYMENTS_IPN_SECRET # Make sure secret is accessible
+    global telegram_app, main_loop, NOWPAYMENTS_IPN_SECRET
+    if not telegram_app or not main_loop: logger.error("Webhook received but Telegram app or event loop not initialized."); return Response(status=503)
 
-    if not telegram_app or not main_loop:
-        logger.error("Webhook received but Telegram app or event loop not initialized.")
-        return Response(status=503) # Service Unavailable
-
-    # --- SIGNATURE VERIFICATION ---
-    # Enable this in production by uncommenting the following lines
     # signature = request.headers.get('x-nowpayments-sig')
     # if not verify_nowpayments_signature(request, signature, NOWPAYMENTS_IPN_SECRET):
     #     logger.error("Invalid NOWPayments webhook signature received or verification failed.")
-    #     return Response("Invalid Signature", status=401) # Unauthorized
+    #     return Response("Invalid Signature", status=401)
     # logger.info("NOWPayments webhook signature verified.")
-    # Remove the warning below in production
     logger.warning("!!! NOWPayments signature verification is temporarily disabled !!!")
-    # ---------------------------------------------------------------------------
 
-    if not request.is_json:
-        logger.warning("Webhook received non-JSON request.")
-        return Response("Invalid Request", status=400)
-
-    data = request.get_json()
-    logger.info(f"NOWPayments IPN received (Sig Check Disabled): {json.dumps(data)}")
-
+    if not request.is_json: logger.warning("Webhook received non-JSON request."); return Response("Invalid Request", status=400)
+    data = request.get_json(); logger.info(f"NOWPayments IPN received (Sig Check Disabled): {json.dumps(data)}")
     required_keys = ['payment_id', 'payment_status', 'pay_currency', 'actually_paid']
-    if not all(key in data for key in required_keys):
-        logger.error(f"Webhook missing required keys (need 'actually_paid'). Data: {data}")
-        return Response("Missing required keys", status=400)
-
-    payment_id = data.get('payment_id')
-    status = data.get('payment_status')
-    pay_currency = data.get('pay_currency')
-    actually_paid_str = data.get('actually_paid')
-
-    lang_data = LANGUAGES.get('en', {}) # Default language
+    if not all(key in data for key in required_keys): logger.error(f"Webhook missing required keys. Data: {data}"); return Response("Missing required keys", status=400)
+    payment_id = data.get('payment_id'); status = data.get('payment_status'); pay_currency = data.get('pay_currency'); actually_paid_str = data.get('actually_paid')
+    lang_data = LANGUAGES.get('en', {})
 
     if status in ['finished', 'confirmed', 'partially_paid'] and actually_paid_str is not None:
         logger.info(f"Processing '{status}' payment: {payment_id}")
         try:
             actually_paid_decimal = Decimal(str(actually_paid_str))
-            if actually_paid_decimal <= 0:
-                logger.warning(f"Ignoring webhook for payment {payment_id} with zero or negative 'actually_paid' amount: {actually_paid_decimal}")
-                # Optionally remove pending if status implies finality but amount is zero
-                # if status != 'confirmed':
-                #     asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
-                return Response("Zero amount paid", status=200)
-
-            pending_info = asyncio.run_coroutine_threadsafe(
-                asyncio.to_thread(get_pending_deposit, payment_id), main_loop
-            ).result()
-
+            if actually_paid_decimal <= 0: logger.warning(f"Ignoring webhook for payment {payment_id} with zero amount."); return Response("Zero amount paid", status=200)
+            pending_info = asyncio.run_coroutine_threadsafe(asyncio.to_thread(get_pending_deposit, payment_id), main_loop).result()
             if pending_info:
-                user_id = pending_info['user_id']
-                stored_currency = pending_info['currency']
-                target_eur_decimal = Decimal(str(pending_info['target_eur_amount']))
-                expected_crypto_decimal = Decimal(str(pending_info.get('expected_crypto_amount', '0.0')))
-
-                if stored_currency.lower() != pay_currency.lower():
-                     logger.error(f"Currency mismatch for {payment_id}. DB: {stored_currency}, Webhook: {pay_currency}")
-                     asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
-                     return Response("Currency mismatch", status=400)
-
+                user_id = pending_info['user_id']; stored_currency = pending_info['currency']; target_eur_decimal = Decimal(str(pending_info['target_eur_amount'])); expected_crypto_decimal = Decimal(str(pending_info.get('expected_crypto_amount', '0.0')))
+                if stored_currency.lower() != pay_currency.lower(): logger.error(f"Currency mismatch for {payment_id}. DB: {stored_currency}, Webhook: {pay_currency}"); asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop); return Response("Currency mismatch", status=400)
                 credited_eur_amount = Decimal('0.0')
                 if expected_crypto_decimal > 0:
                     proportion = actually_paid_decimal / expected_crypto_decimal
                     credited_eur_amount = (proportion * target_eur_decimal)
-                    payment_comparison = "paid exact"
+                    payment_comparison = "paid exact";
                     if actually_paid_decimal > expected_crypto_decimal: payment_comparison = "overpaid"
                     elif actually_paid_decimal < expected_crypto_decimal: payment_comparison = "underpaid"
                     logger.info(f"Payment {payment_id} ({status}): User {user_id} {payment_comparison} ({actually_paid_decimal} {pay_currency} vs expected {expected_crypto_decimal}). Crediting proportional {credited_eur_amount:.8f} EUR (based on target {target_eur_decimal} EUR).")
-                else:
-                    logger.error(f"Payment {payment_id} ({status}): Could not calculate proportional credit for user {user_id} because expected_crypto_amount was zero or invalid in DB ({pending_info.get('expected_crypto_amount')}). Crediting 0 EUR.")
-                    credited_eur_amount = Decimal('0.0')
-
+                else: logger.error(f"Payment {payment_id} ({status}): Could not calculate proportional credit for user {user_id} (expected_crypto_amount={pending_info.get('expected_crypto_amount')}). Crediting 0 EUR."); credited_eur_amount = Decimal('0.0')
                 credited_eur_amount = (credited_eur_amount * FEE_ADJUSTMENT).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
-                logger.info(f"Payment {payment_id} ({status}): Final credited amount after fee adjustment ({FEE_ADJUSTMENT}) and rounding: {credited_eur_amount:.2f} EUR.")
-
+                logger.info(f"Payment {payment_id} ({status}): Final credited amount after fee adjustment ({FEE_ADJUSTMENT}): {credited_eur_amount:.2f} EUR.")
                 if credited_eur_amount > 0:
                     dummy_context = ContextTypes.DEFAULT_TYPE(application=telegram_app, chat_id=user_id, user_id=user_id)
-                    future = asyncio.run_coroutine_threadsafe(
-                        payment.process_successful_refill(user_id, credited_eur_amount, payment_id, dummy_context),
-                        main_loop
-                    )
+                    future = asyncio.run_coroutine_threadsafe(payment.process_successful_refill(user_id, credited_eur_amount, payment_id, dummy_context), main_loop)
                     try:
                          db_update_success = future.result(timeout=30)
-                         if db_update_success:
-                              asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
-                              logger.info(f"Successfully processed and removed pending deposit {payment_id} (Status: {status})")
-                         else:
-                              logger.critical(f"CRITICAL: Payment {payment_id} ({status}) processed, but process_successful_refill failed for user {user_id}. Balance NOT updated. Pending deposit NOT removed. Manual intervention required.")
-                    except asyncio.TimeoutError:
-                         logger.error(f"Timeout waiting for process_successful_refill result for {payment_id}. Pending deposit NOT removed.")
-                    except Exception as e:
-                         logger.error(f"Error getting result from process_successful_refill for {payment_id}: {e}. Pending deposit NOT removed.", exc_info=True)
-                else:
-                    logger.warning(f"Payment {payment_id} ({status}): Calculated credited EUR is zero for user {user_id}. Removing pending deposit without updating balance.")
-                    asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
-
-            else:
-                parent_payment_id = data.get('parent_payment_id')
-                if parent_payment_id:
-                     logger.warning(f"Webhook Warning: Received update for payment ID {payment_id} (child of {parent_payment_id}), but no primary pending deposit found for {payment_id}. Might be overpayment/refund difference.")
-                else:
-                    logger.warning(lang_data.get("webhook_pending_not_found", "Webhook Warning: Received update for payment ID {payment_id}, but no pending deposit found in DB.").format(payment_id=payment_id))
-
-        except (ValueError, TypeError) as e:
-            logger.error(f"Webhook Error: Invalid number format in webhook data for {payment_id}. Error: {e}. Data: {data}")
-        except Exception as e:
-            logger.error(lang_data.get("webhook_processing_error", "Webhook Error: Could not process payment update {payment_id}.").format(payment_id=payment_id), exc_info=True)
-
+                         if db_update_success: asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop); logger.info(f"Successfully processed and removed pending deposit {payment_id} (Status: {status})")
+                         else: logger.critical(f"CRITICAL: Payment {payment_id} ({status}) processed, but process_successful_refill failed for user {user_id}. Balance NOT updated. Pending deposit NOT removed. Manual intervention required.")
+                    except asyncio.TimeoutError: logger.error(f"Timeout waiting for process_successful_refill result for {payment_id}. Pending deposit NOT removed.")
+                    except Exception as e: logger.error(f"Error getting result from process_successful_refill for {payment_id}: {e}. Pending deposit NOT removed.", exc_info=True)
+                else: logger.warning(f"Payment {payment_id} ({status}): Calculated credited EUR is zero for user {user_id}. Removing pending deposit without updating balance."); asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop)
+            else: logger.warning(lang_data.get("webhook_pending_not_found", "Webhook Warning: Received update for payment ID {payment_id}, but no pending deposit found in DB.").format(payment_id=payment_id))
+        except (ValueError, TypeError) as e: logger.error(f"Webhook Error: Invalid number format in webhook data for {payment_id}. Error: {e}. Data: {data}")
+        except Exception as e: logger.error(lang_data.get("webhook_processing_error", "Webhook Error: Could not process payment update {payment_id}.").format(payment_id=payment_id), exc_info=True)
     elif status in ['failed', 'expired', 'refunded']:
         logger.warning(f"Payment {payment_id} has status '{status}'. Removing pending record.")
         pending_info_for_removal = None
-        try:
-            pending_info_for_removal = asyncio.run_coroutine_threadsafe(
-                 asyncio.to_thread(get_pending_deposit, payment_id), main_loop
-            ).result(timeout=5)
-        except Exception as e:
-            logger.error(f"Error checking pending deposit for {payment_id} before removal/notification: {e}")
-
+        try: pending_info_for_removal = asyncio.run_coroutine_threadsafe(asyncio.to_thread(get_pending_deposit, payment_id), main_loop).result(timeout=5)
+        except Exception as e: logger.error(f"Error checking pending deposit for {payment_id} before removal: {e}")
         removal_done = False
-        try:
-            removal_done = asyncio.run_coroutine_threadsafe(
-                asyncio.to_thread(remove_pending_deposit, payment_id), main_loop
-            ).result(timeout=5)
-        except Exception as e:
-            logger.error(f"Error removing pending deposit {payment_id} for status '{status}': {e}")
-
+        try: removal_done = asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id), main_loop).result(timeout=5)
+        except Exception as e: logger.error(f"Error removing pending deposit {payment_id} for status '{status}': {e}")
         if removal_done and pending_info_for_removal and telegram_app:
             user_id = pending_info_for_removal['user_id']
             try:
-                lang = 'en'
-                lang_data_local = LANGUAGES.get(lang, LANGUAGES['en'])
-                cancelled_msg = lang_data_local.get("payment_cancelled_or_expired", "Payment Status: Your payment ({payment_id}) was cancelled or expired.").format(payment_id=payment_id)
-                asyncio.run_coroutine_threadsafe(
-                     send_message_with_retry(telegram_app.bot, user_id, cancelled_msg, parse_mode=None),
-                     main_loop
-                )
-            except Exception as notify_e:
-                 logger.error(f"Error notifying user {user_id} about cancelled/expired payment {payment_id}: {notify_e}")
-
-    else:
-         logger.info(f"Webhook received for payment {payment_id} with status: {status} (ignored).")
-
-    return Response(status=200) # Always acknowledge receipt
-
+                lang = 'en'; lang_data_local = LANGUAGES.get(lang, LANGUAGES['en']); cancelled_msg = lang_data_local.get("payment_cancelled_or_expired", "Payment Status: Your payment ({payment_id}) was cancelled or expired.").format(payment_id=payment_id)
+                asyncio.run_coroutine_threadsafe(send_message_with_retry(telegram_app.bot, user_id, cancelled_msg, parse_mode=None), main_loop)
+            except Exception as notify_e: logger.error(f"Error notifying user {user_id} about cancelled/expired payment {payment_id}: {notify_e}")
+    else: logger.info(f"Webhook received for payment {payment_id} with status: {status} (ignored).")
+    return Response(status=200)
 
 @flask_app.route(f"/telegram/{TOKEN}", methods=['POST'])
 async def telegram_webhook():
-    """Handles incoming Telegram updates via webhook."""
     global telegram_app, main_loop
-    if not telegram_app or not main_loop:
-        logger.error("Telegram webhook received but app/loop not ready.")
-        return Response(status=503)
+    if not telegram_app or not main_loop: logger.error("Telegram webhook received but app/loop not ready."); return Response(status=503)
     try:
-        update_data = request.get_json(force=True)
-        update = Update.de_json(update_data, telegram_app.bot)
+        update_data = request.get_json(force=True); update = Update.de_json(update_data, telegram_app.bot)
         asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), main_loop)
         return Response(status=200)
-    except json.JSONDecodeError:
-        logger.error("Telegram webhook received invalid JSON.")
-        return Response("Invalid JSON", status=400)
-    except Exception as e:
-        logger.error(f"Error processing Telegram webhook: {e}", exc_info=True)
-        return Response("Internal Server Error", status=500)
-
+    except json.JSONDecodeError: logger.error("Telegram webhook received invalid JSON."); return Response("Invalid JSON", status=400)
+    except Exception as e: logger.error(f"Error processing Telegram webhook: {e}", exc_info=True); return Response("Internal Server Error", status=500)
 
 # --- Main Function ---
 def main() -> None:
-    """Start the bot and the Flask webhook server."""
     global telegram_app, main_loop
     logger.info("Starting bot...")
-
-    # --- Initialize Database and Load Data ---
     init_db()
     load_all_data()
-
-    # --- Initialize Telegram Application ---
-    defaults = Defaults(parse_mode=None, block=False) # Default to plain text
+    defaults = Defaults(parse_mode=None, block=False)
     app_builder = ApplicationBuilder().token(TOKEN).defaults(defaults).job_queue(JobQueue())
-
-    # Add handlers
     app_builder.post_init(post_init)
     app_builder.post_shutdown(post_shutdown)
     application = app_builder.build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", handle_admin_menu))
     application.add_handler(CallbackQueryHandler(handle_callback_query))
-    application.add_handler(MessageHandler(
-        (filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL,
-        handle_message
-    ))
+    application.add_handler(MessageHandler((filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL, handle_message))
     application.add_error_handler(error_handler)
-
-    telegram_app = application # Store application globally for webhook access
-    main_loop = asyncio.get_event_loop() # Get the current event loop
-
-    # --- Setup Background Job for Baskets ---
+    telegram_app = application
+    main_loop = asyncio.get_event_loop()
     if BASKET_TIMEOUT > 0:
         job_queue = application.job_queue
-        if job_queue:
-            logger.info(f"Setting up background job for expired baskets (interval: 60s)...")
-            job_queue.run_repeating(
-                 clear_expired_baskets_job_wrapper,
-                 interval=timedelta(seconds=60),
-                 first=timedelta(seconds=10),
-                 name="clear_baskets"
-            )
-            logger.info("Background job setup complete.")
-        else:
-            logger.warning("Job Queue is not available. Basket clearing job skipped.")
-    else:
-        logger.warning("BASKET_TIMEOUT is not positive. Skipping background job setup.")
+        if job_queue: logger.info(f"Setting up background job for expired baskets (interval: 60s)..."); job_queue.run_repeating(clear_expired_baskets_job_wrapper, interval=timedelta(seconds=60), first=timedelta(seconds=10), name="clear_baskets"); logger.info("Background job setup complete.")
+        else: logger.warning("Job Queue not available. Basket clearing job skipped.")
+    else: logger.warning("BASKET_TIMEOUT not positive. Skipping background job setup.")
 
-    # --- Webhook Setup & Server Start ---
     async def setup_webhooks_and_run():
         nonlocal application
         logger.info("Initializing application...")
         await application.initialize()
-
         webhook_full_url = f"{WEBHOOK_URL}/telegram/{TOKEN}"
         logger.info(f"Setting Telegram webhook to: {webhook_full_url}")
-        if await application.bot.set_webhook(url=webhook_full_url, allowed_updates=Update.ALL_TYPES):
-            logger.info("Telegram webhook set successfully.")
-        else:
-            logger.error("Failed to set Telegram webhook.")
-            return
-
+        if await application.bot.set_webhook(url=webhook_full_url, allowed_updates=Update.ALL_TYPES): logger.info("Telegram webhook set successfully.")
+        else: logger.error("Failed to set Telegram webhook."); return
         await application.start()
         logger.info("Telegram application started (webhook mode).")
-
         port = int(os.environ.get("PORT", 8080))
-        flask_thread = threading.Thread(
-            target=lambda: flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False), # Added use_reloader=False
-            daemon=True
-        )
+        flask_thread = threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False), daemon=True)
         flask_thread.start()
         logger.info(f"Flask server started in a background thread on port {port}.")
-
         logger.info("Main thread entering keep-alive loop...")
-        # Keep the main async loop running indefinitely
-        await asyncio.Event().wait() # This waits forever
+        await asyncio.Event().wait()
 
-    # --- Run the main async setup ---
     try:
         main_loop.run_until_complete(setup_webhooks_and_run())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Shutdown signal received.")
-    except Exception as e:
-        logger.critical(f"Critical error in main execution: {e}", exc_info=True)
+    except (KeyboardInterrupt, SystemExit): logger.info("Shutdown signal received.")
+    except Exception as e: logger.critical(f"Critical error in main execution: {e}", exc_info=True)
     finally:
         logger.info("Initiating shutdown...")
         if telegram_app:
             logger.info("Stopping Telegram application...")
-            if main_loop and main_loop.is_running():
-                 # Run shutdown tasks within the loop
-                 main_loop.run_until_complete(telegram_app.stop())
-                 main_loop.run_until_complete(telegram_app.shutdown())
-            else:
-                 # Fallback if loop isn't running (less ideal)
-                 asyncio.run(telegram_app.shutdown())
+            if main_loop and main_loop.is_running(): main_loop.run_until_complete(telegram_app.stop()); main_loop.run_until_complete(telegram_app.shutdown())
+            else: asyncio.run(telegram_app.shutdown())
             logger.info("Telegram application stopped.")
         logger.info("Bot shutdown complete.")
-
 
 if __name__ == '__main__':
     main()
