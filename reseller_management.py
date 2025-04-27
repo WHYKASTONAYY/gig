@@ -14,17 +14,18 @@ import telegram.error as telegram_error
 # Import shared elements from utils
 from utils import (
     ADMIN_ID, LANGUAGES, get_db_connection, send_message_with_retry,
-    PRODUCT_TYPES, format_currency, log_admin_action, load_all_data, # Added load_all_data
+    PRODUCT_TYPES, format_currency, log_admin_action, load_all_data,
     DEFAULT_PRODUCT_EMOJI
 )
 
 # Logging setup specific to this module
 logger = logging.getLogger(__name__)
 
-# Constants
-USERS_PER_PAGE_RESELLER = 10 # Users per page when selecting reseller
+# Constants (USERS_PER_PAGE_RESELLER no longer needed for status management)
+USERS_PER_PAGE_DISCOUNT_SELECT = 10 # Keep for selecting reseller for discount mgmt
 
 # --- Helper Function to Get Reseller Discount ---
+# (Keep this function as is)
 def get_reseller_discount(user_id: int, product_type: str) -> Decimal:
     """Fetches the discount percentage for a specific reseller and product type."""
     discount = Decimal('0.0')
@@ -32,11 +33,9 @@ def get_reseller_discount(user_id: int, product_type: str) -> Decimal:
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        # Check if user is reseller first
         c.execute("SELECT is_reseller FROM users WHERE user_id = ?", (user_id,))
         res = c.fetchone()
         if res and res['is_reseller'] == 1:
-            # Fetch specific discount
             c.execute("""
                 SELECT discount_percentage FROM reseller_discounts
                 WHERE reseller_user_id = ? AND product_type = ?
@@ -55,96 +54,118 @@ def get_reseller_discount(user_id: int, product_type: str) -> Decimal:
 
 
 # ==================================
-# --- Admin: Manage Reseller Status ---
+# --- Admin: Manage Reseller Status --- (REVISED FLOW)
 # ==================================
 
 async def handle_manage_resellers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Displays a paginated list of users to toggle their reseller status."""
+    """Prompts admin to enter the User ID to manage reseller status."""
     query = update.callback_query
     if query.from_user.id != ADMIN_ID: return await query.answer("Access Denied.", show_alert=True)
-    offset = 0
-    if params and len(params) > 0 and params[0].isdigit(): offset = int(params[0])
 
-    users = []
-    total_users = 0
+    # Set state to expect a user ID message
+    context.user_data['state'] = 'awaiting_reseller_manage_id'
+
+    prompt_msg = ("👤 Manage Reseller Status\n\n"
+                  "Please reply with the Telegram User ID of the person you want to manage as a reseller.")
+    keyboard = [[InlineKeyboardButton("⬅️ Back to Admin Menu", callback_data="admin_menu")]]
+
+    await query.edit_message_text(prompt_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    await query.answer("Enter User ID in chat.")
+
+
+async def handle_reseller_manage_id_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the admin entering a User ID for reseller status management."""
+    admin_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if admin_id != ADMIN_ID: return
+    if context.user_data.get("state") != 'awaiting_reseller_manage_id': return
+    if not update.message or not update.message.text: return
+
+    entered_id_text = update.message.text.strip()
+
+    try:
+        target_user_id = int(entered_id_text)
+        if target_user_id == admin_id:
+            await send_message_with_retry(context.bot, chat_id, "❌ You cannot manage your own reseller status.")
+            # Keep state awaiting another ID
+            return
+
+    except ValueError:
+        await send_message_with_retry(context.bot, chat_id, "❌ Invalid User ID. Please enter a number.")
+        # Keep state awaiting another ID
+        return
+
+    # Clear state now that we have a potential ID
+    context.user_data.pop('state', None)
+
+    # Fetch user info
     conn = None
+    user_info = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT COUNT(*) as count FROM users WHERE user_id != ?", (ADMIN_ID,))
-        count_res = c.fetchone(); total_users = count_res['count'] if count_res else 0
-        c.execute("""
-            SELECT user_id, username, is_reseller FROM users
-            WHERE user_id != ?
-            ORDER BY user_id DESC LIMIT ? OFFSET ?
-        """, (ADMIN_ID, USERS_PER_PAGE_RESELLER, offset))
-        users = c.fetchall()
+        c.execute("SELECT user_id, username, is_reseller FROM users WHERE user_id = ?", (target_user_id,))
+        user_info = c.fetchone()
     except sqlite3.Error as e:
-        logger.error(f"DB error fetching users for reseller mgmt: {e}")
-        await query.edit_message_text("❌ DB Error fetching users.")
+        logger.error(f"DB error fetching user {target_user_id} for reseller check: {e}")
+        await send_message_with_retry(context.bot, chat_id, "❌ Database error checking user.")
+        # Go back to admin menu on error
+        await send_message_with_retry(context.bot, chat_id, "Returning to menu...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Admin Menu", callback_data="admin_menu")]]))
         return
     finally:
         if conn: conn.close()
 
-    msg_parts = ["👤 Manage Reseller Status\n\nSelect user to toggle status:\n"]
+    if not user_info:
+        await send_message_with_retry(context.bot, chat_id, f"❌ User ID {target_user_id} not found in the bot's database.")
+        # Go back to admin menu
+        await send_message_with_retry(context.bot, chat_id, "Returning to menu...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Admin Menu", callback_data="admin_menu")]]))
+        return
+
+    # Display user info and toggle buttons
+    username = user_info['username'] or f"ID_{target_user_id}"
+    is_reseller = user_info['is_reseller'] == 1
+    current_status_text = "✅ IS currently a Reseller" if is_reseller else "❌ Is NOT currently a Reseller"
+
+    msg = (f"👤 Manage Reseller: @{username} (ID: {target_user_id})\n\n"
+           f"Current Status: {current_status_text}")
+
     keyboard = []
-    item_buttons = []
-
-    if not users and offset == 0: msg_parts.append("\nNo users found.")
-    elif not users: msg_parts.append("\nNo more users.")
+    if is_reseller:
+        keyboard.append([InlineKeyboardButton("🚫 Disable Reseller Status", callback_data=f"reseller_toggle_status|{target_user_id}|0")]) # Offset 0 as placeholder
     else:
-        for user in users:
-            user_id_target = user['user_id']
-            username = user['username'] or f"ID_{user_id_target}"
-            status_emoji = "✅ Reseller" if user['is_reseller'] else "❌ Not Reseller"
-            button_text = f"{status_emoji} - @{username}"
-            msg_parts.append(f"\n • @{username} (ID: {user_id_target}) - Status: {status_emoji}") # Info in message
-            item_buttons.append([InlineKeyboardButton(button_text, callback_data=f"reseller_toggle_status|{user_id_target}|{offset}")])
-        keyboard.extend(item_buttons)
-        # Pagination
-        total_pages = math.ceil(max(0, total_users) / USERS_PER_PAGE_RESELLER)
-        current_page = (offset // USERS_PER_PAGE_RESELLER) + 1
-        nav_buttons = []
-        if current_page > 1: nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"manage_resellers_menu|{max(0, offset - USERS_PER_PAGE_RESELLER)}"))
-        if current_page < total_pages: nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"manage_resellers_menu|{offset + USERS_PER_PAGE_RESELLER}"))
-        if nav_buttons: keyboard.append(nav_buttons)
-        msg_parts.append(f"\nPage {current_page}/{total_pages}")
+        keyboard.append([InlineKeyboardButton("✅ Enable Reseller Status", callback_data=f"reseller_toggle_status|{target_user_id}|0")]) # Offset 0 as placeholder
 
+    keyboard.append([InlineKeyboardButton("⬅️ Manage Another User", callback_data="manage_resellers_menu")]) # Back to the prompt
     keyboard.append([InlineKeyboardButton("⬅️ Back to Admin Menu", callback_data="admin_menu")])
-    final_msg = "".join(msg_parts)
-    try:
-        await query.edit_message_text(final_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
-    except telegram_error.BadRequest as e:
-        if "message is not modified" not in str(e).lower():
-            logger.error(f"Error editing reseller status list: {e}")
-            await query.answer("Error updating list.", show_alert=True)
-        else: await query.answer()
-    except Exception as e:
-        logger.error(f"Unexpected error display reseller list: {e}", exc_info=True)
-        await query.edit_message_text("❌ Error displaying list.")
+
+    await send_message_with_retry(context.bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
 
 async def handle_reseller_toggle_status(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Toggles the is_reseller flag for a user."""
+    """Toggles the is_reseller flag for a user (called from user display)."""
     query = update.callback_query
     admin_id = query.from_user.id
+    chat_id = query.message.chat_id # Get chat_id for sending messages
+
     if admin_id != ADMIN_ID: return await query.answer("Access Denied.", show_alert=True)
-    if not params or len(params) < 2 or not params[0].isdigit() or not params[1].isdigit():
+    # Params now only need target user ID, offset is irrelevant here
+    if not params or not params[0].isdigit():
         await query.answer("Error: Invalid data.", show_alert=True); return
 
     target_user_id = int(params[0])
-    offset = int(params[1])
     conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT is_reseller FROM users WHERE user_id = ?", (target_user_id,))
+        c.execute("SELECT username, is_reseller FROM users WHERE user_id = ?", (target_user_id,))
         user_data = c.fetchone()
         if not user_data:
             await query.answer("User not found.", show_alert=True)
-            return await handle_manage_resellers_menu(update, context, [str(offset)])
+            # Go back to the prompt to enter another ID
+            return await handle_manage_resellers_menu(update, context)
 
         current_status = user_data['is_reseller']
+        username = user_data['username'] or f"ID_{target_user_id}"
         new_status = 0 if current_status == 1 else 1
         c.execute("UPDATE users SET is_reseller = ? WHERE user_id = ?", (new_status, target_user_id))
         conn.commit()
@@ -155,7 +176,24 @@ async def handle_reseller_toggle_status(update: Update, context: ContextTypes.DE
 
         status_text = "enabled" if new_status == 1 else "disabled"
         await query.answer(f"Reseller status {status_text} for user {target_user_id}.")
-        await handle_manage_resellers_menu(update, context, [str(offset)]) # Refresh list
+
+        # Refresh the user info display after toggling
+        # Display user info and toggle buttons
+        new_status_text = "✅ IS currently a Reseller" if new_status == 1 else "❌ Is NOT currently a Reseller"
+        msg = (f"👤 Manage Reseller: @{username} (ID: {target_user_id})\n\n"
+               f"Status Updated: {new_status_text}")
+
+        keyboard = []
+        if new_status == 1: # Now a reseller
+            keyboard.append([InlineKeyboardButton("🚫 Disable Reseller Status", callback_data=f"reseller_toggle_status|{target_user_id}|0")])
+        else: # Not a reseller
+            keyboard.append([InlineKeyboardButton("✅ Enable Reseller Status", callback_data=f"reseller_toggle_status|{target_user_id}|0")])
+
+        keyboard.append([InlineKeyboardButton("⬅️ Manage Another User", callback_data="manage_resellers_menu")])
+        keyboard.append([InlineKeyboardButton("⬅️ Back to Admin Menu", callback_data="admin_menu")])
+
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
 
     except sqlite3.Error as e:
         logger.error(f"DB error toggling reseller status {target_user_id}: {e}")
@@ -168,11 +206,11 @@ async def handle_reseller_toggle_status(update: Update, context: ContextTypes.DE
 
 
 # ========================================
-# --- Admin: Manage Reseller Discounts ---
+# --- Admin: Manage Reseller Discounts --- (Keep as is, uses pagination)
 # ========================================
 
 async def handle_manage_reseller_discounts_select_reseller(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
-    """Admin selects which active reseller to manage discounts for."""
+    """Admin selects which active reseller to manage discounts for (PAGINATED)."""
     query = update.callback_query
     if query.from_user.id != ADMIN_ID: return await query.answer("Access Denied.", show_alert=True)
     offset = 0
@@ -189,7 +227,7 @@ async def handle_manage_reseller_discounts_select_reseller(update: Update, conte
         c.execute("""
             SELECT user_id, username FROM users
             WHERE is_reseller = 1 ORDER BY user_id DESC LIMIT ? OFFSET ?
-        """, (USERS_PER_PAGE_RESELLER, offset))
+        """, (USERS_PER_PAGE_DISCOUNT_SELECT, offset)) # Use specific constant
         resellers = c.fetchall()
     except sqlite3.Error as e:
         logger.error(f"DB error fetching active resellers: {e}")
@@ -210,11 +248,11 @@ async def handle_manage_reseller_discounts_select_reseller(update: Update, conte
             item_buttons.append([InlineKeyboardButton(f"👤 @{username}", callback_data=f"reseller_manage_specific|{r['user_id']}")])
         keyboard.extend(item_buttons)
         # Pagination
-        total_pages = math.ceil(max(0, total_resellers) / USERS_PER_PAGE_RESELLER)
-        current_page = (offset // USERS_PER_PAGE_RESELLER) + 1
+        total_pages = math.ceil(max(0, total_resellers) / USERS_PER_PAGE_DISCOUNT_SELECT)
+        current_page = (offset // USERS_PER_PAGE_DISCOUNT_SELECT) + 1
         nav_buttons = []
-        if current_page > 1: nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"manage_reseller_discounts_select_reseller|{max(0, offset - USERS_PER_PAGE_RESELLER)}"))
-        if current_page < total_pages: nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"manage_reseller_discounts_select_reseller|{offset + USERS_PER_PAGE_RESELLER}"))
+        if current_page > 1: nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"manage_reseller_discounts_select_reseller|{max(0, offset - USERS_PER_PAGE_DISCOUNT_SELECT)}"))
+        if current_page < total_pages: nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"manage_reseller_discounts_select_reseller|{offset + USERS_PER_PAGE_DISCOUNT_SELECT}"))
         if nav_buttons: keyboard.append(nav_buttons)
         msg += f"\nPage {current_page}/{total_pages}"
 
@@ -230,6 +268,8 @@ async def handle_manage_reseller_discounts_select_reseller(update: Update, conte
         logger.error(f"Error display reseller selection list: {e}", exc_info=True)
         await query.edit_message_text("❌ Error displaying list.")
 
+
+# --- Manage Specific Reseller Discounts (Keep handlers below as they are) ---
 
 async def handle_manage_specific_reseller_discounts(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Displays current discounts for a specific reseller and allows adding/editing."""
@@ -268,18 +308,16 @@ async def handle_manage_specific_reseller_discounts(update: Update, context: Con
         msg += "Current Discounts:\n"
         for discount in discounts:
             p_type = discount['product_type']
-            # Ensure PRODUCT_TYPES is loaded if needed here, or rely on global load
             emoji = PRODUCT_TYPES.get(p_type, DEFAULT_PRODUCT_EMOJI)
             percentage = Decimal(str(discount['discount_percentage']))
             msg += f" • {emoji} {p_type}: {percentage:.1f}%\n"
-            # Add Edit/Delete buttons per item
             keyboard.append([
                  InlineKeyboardButton(f"✏️ Edit {p_type} ({percentage:.1f}%)", callback_data=f"reseller_edit_discount|{target_reseller_id}|{p_type}"),
                  InlineKeyboardButton(f"🗑️ Delete", callback_data=f"reseller_delete_discount_confirm|{target_reseller_id}|{p_type}")
             ])
 
     keyboard.append([InlineKeyboardButton("➕ Add New Discount Rule", callback_data=f"reseller_add_discount_select_type|{target_reseller_id}")])
-    keyboard.append([InlineKeyboardButton("⬅️ Back to Reseller List", callback_data="manage_reseller_discounts_select_reseller|0")]) # Back to first page
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Reseller List", callback_data="manage_reseller_discounts_select_reseller|0")])
 
     try:
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
@@ -302,7 +340,7 @@ async def handle_reseller_add_discount_select_type(update: Update, context: Cont
         await query.answer("Error: Invalid user ID.", show_alert=True); return
 
     target_reseller_id = int(params[0])
-    load_all_data() # Ensure PRODUCT_TYPES is fresh
+    load_all_data()
 
     if not PRODUCT_TYPES:
         await query.edit_message_text("❌ No product types configured. Please add types via 'Manage Product Types'.")
@@ -331,7 +369,7 @@ async def handle_reseller_add_discount_enter_percent(update: Update, context: Co
     context.user_data['state'] = 'awaiting_reseller_discount_percent'
     context.user_data['reseller_mgmt_target_id'] = target_reseller_id
     context.user_data['reseller_mgmt_product_type'] = product_type
-    context.user_data['reseller_mgmt_mode'] = 'add' # 'add' or 'edit'
+    context.user_data['reseller_mgmt_mode'] = 'add'
 
     await query.edit_message_text(
         f"Enter discount percentage for {emoji} {product_type} (e.g., 10 or 15.5):",
@@ -353,13 +391,10 @@ async def handle_reseller_edit_discount(update: Update, context: ContextTypes.DE
     product_type = params[1]
     emoji = PRODUCT_TYPES.get(product_type, DEFAULT_PRODUCT_EMOJI)
 
-    # Fetch current value for display if needed, but prompt is for new value
-    # current_discount = get_reseller_discount(target_reseller_id, product_type) # Could add this
-
     context.user_data['state'] = 'awaiting_reseller_discount_percent'
     context.user_data['reseller_mgmt_target_id'] = target_reseller_id
     context.user_data['reseller_mgmt_product_type'] = product_type
-    context.user_data['reseller_mgmt_mode'] = 'edit' # Set mode to edit
+    context.user_data['reseller_mgmt_mode'] = 'edit'
 
     await query.edit_message_text(
         f"Enter *new* discount percentage for {emoji} {product_type} (e.g., 10 or 15.5):",
@@ -367,6 +402,7 @@ async def handle_reseller_edit_discount(update: Update, context: ContextTypes.DE
         parse_mode=None
     )
     await query.answer("Enter new percentage in chat.")
+
 
 async def handle_reseller_percent_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the admin entering the discount percentage via message."""
@@ -379,13 +415,12 @@ async def handle_reseller_percent_message(update: Update, context: ContextTypes.
     percent_text = update.message.text.strip()
     target_user_id = context.user_data.get('reseller_mgmt_target_id')
     product_type = context.user_data.get('reseller_mgmt_product_type')
-    mode = context.user_data.get('reseller_mgmt_mode', 'add') # Default to add
+    mode = context.user_data.get('reseller_mgmt_mode', 'add')
 
     if target_user_id is None or not product_type:
         logger.error("State awaiting_reseller_discount_percent missing context data.")
         await send_message_with_retry(context.bot, chat_id, "❌ Error: Context lost. Please start again.")
         context.user_data.pop('state', None)
-        # Try to send back to reseller list if possible, otherwise admin menu
         fallback_cb = "manage_reseller_discounts_select_reseller|0"
         await send_message_with_retry(context.bot, chat_id, "Returning...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=fallback_cb)]]))
         return
@@ -402,18 +437,17 @@ async def handle_reseller_percent_message(update: Update, context: ContextTypes.
         try:
             conn = get_db_connection()
             c = conn.cursor()
-            c.execute("BEGIN") # Start transaction
+            c.execute("BEGIN")
 
             if mode == 'edit':
-                # Fetch old value before updating
                 c.execute("SELECT discount_percentage FROM reseller_discounts WHERE reseller_user_id = ? AND product_type = ?", (target_user_id, product_type))
                 old_res = c.fetchone()
                 old_value = old_res['discount_percentage'] if old_res else None
 
             if mode == 'add':
-                sql = "INSERT INTO reseller_discounts (reseller_user_id, product_type, discount_percentage) VALUES (?, ?, ?)"
+                sql = "INSERT OR REPLACE INTO reseller_discounts (reseller_user_id, product_type, discount_percentage) VALUES (?, ?, ?)"
                 params_sql = (target_user_id, product_type, float(percentage))
-                action_desc = "RESELLER_DISCOUNT_ADD"
+                action_desc = "RESELLER_DISCOUNT_ADD" if old_value is None else "RESELLER_DISCOUNT_EDIT" # Adjust action based on whether it existed
             else: # mode == 'edit'
                 sql = "UPDATE reseller_discounts SET discount_percentage = ? WHERE reseller_user_id = ? AND product_type = ?"
                 params_sql = (float(percentage), target_user_id, product_type)
@@ -421,47 +455,33 @@ async def handle_reseller_percent_message(update: Update, context: ContextTypes.
 
             result = c.execute(sql, params_sql)
 
-            # Ensure the edit actually changed a row if editing
-            if mode == 'edit' and result.rowcount == 0:
+            if mode == 'edit' and result.rowcount == 0 and old_value is not None:
                  logger.warning(f"Attempted to edit non-existent discount rule for user {target_user_id}, type {product_type}")
-                 conn.rollback() # Rollback the failed update attempt
+                 conn.rollback()
                  await send_message_with_retry(context.bot, chat_id, "❌ Error: Rule not found to edit.")
             else:
-                conn.commit() # Commit successful insert or update
-
-                # Log action
+                conn.commit()
                 log_admin_action(
-                    admin_id=admin_id,
-                    action=action_desc,
-                    target_user_id=target_user_id,
-                    reason=f"Type: {product_type}",
-                    old_value=old_value, # Will be None for adds
-                    new_value=float(percentage)
+                    admin_id=admin_id, action=action_desc, target_user_id=target_user_id,
+                    reason=f"Type: {product_type}", old_value=old_value, new_value=float(percentage)
                 )
-
-                action_verb = "added" if mode == 'add' else "updated"
+                action_verb = "set" if mode == 'add' else "updated"
                 await send_message_with_retry(context.bot, chat_id, f"✅ Discount rule {action_verb} for {product_type}: {percentage:.1f}%",
                                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=back_callback)]]))
 
-            # Clear state ONLY after successful operation or known error handling
             context.user_data.pop('state', None); context.user_data.pop('reseller_mgmt_target_id', None)
             context.user_data.pop('reseller_mgmt_product_type', None); context.user_data.pop('reseller_mgmt_mode', None)
 
-
-        except sqlite3.IntegrityError: # Handles adding duplicate PK
-            await send_message_with_retry(context.bot, chat_id, f"❌ Error: A discount rule for {product_type} already exists for this user. Use 'Edit' instead.")
-            context.user_data.pop('state', None) # Clear state even on error
-        except sqlite3.Error as e:
+        except sqlite3.Error as e: # Catch potential DB errors like IntegrityError implicitly
             logger.error(f"DB error {mode} reseller discount: {e}", exc_info=True)
             if conn and conn.in_transaction: conn.rollback()
             await send_message_with_retry(context.bot, chat_id, "❌ DB Error saving discount rule.")
-            context.user_data.pop('state', None) # Clear state even on error
+            context.user_data.pop('state', None)
         finally:
             if conn: conn.close()
 
     except ValueError:
         await send_message_with_retry(context.bot, chat_id, "❌ Invalid percentage. Enter a number between 0 and 100 (e.g., 10 or 15.5).")
-        # Keep state awaiting valid input
 
 
 async def handle_reseller_delete_discount_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
